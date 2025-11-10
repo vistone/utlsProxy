@@ -143,7 +143,7 @@ accessControl.AddIP("192.168.1.100", true) // 添加到白名单
 ```bash
 go test ./test/... -v
 ```
-
+github token="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"
 ## 依赖库
 
 - [uTLS](https://github.com/refraction-networking/utls) - 用于 TLS 指纹伪装
