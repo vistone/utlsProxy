@@ -82,16 +82,12 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	statusCode, body, err := s.crawler.handleTaskRequest(ctx, req.ClientID, req.Path)
 	resp.StatusCode = int32(statusCode)
 	
-	// 记录gRPC响应大小
-	responseSize := int64(len(resp.Body))
-	if resp.ErrorMessage != "" {
-		responseSize += int64(len(resp.ErrorMessage))
-	}
-	atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
-	
 	if err != nil {
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 		resp.ErrorMessage = err.Error()
+		// 记录gRPC响应大小（错误消息）
+		responseSize := int64(len(resp.ErrorMessage))
+		atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
 		return resp, nil
 	}
 
@@ -102,6 +98,13 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	}
 
 	resp.Body = body
+	// 记录gRPC响应大小（响应体）
+	responseSize := int64(len(resp.Body))
+	if resp.ErrorMessage != "" {
+		responseSize += int64(len(resp.ErrorMessage))
+	}
+	atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
+	
 	return resp, nil
 }
 
