@@ -334,7 +334,11 @@ func (p *domainConnPool) GetConnByIP(targetIP string) (*ConnMetadata, error) {
 		}
 	}
 
-	localIP, _ := p.getLocalIP()
+	// 判断目标IP类型
+	targetIPAddr := net.ParseIP(targetIP)
+	isTargetIPv6 := targetIPAddr != nil && targetIPAddr.To4() == nil && targetIPAddr.To16() != nil
+	// 根据目标IP类型选择相应的本地IP
+	localIP := p.getLocalIPForTarget(targetIP, isTargetIPv6)
 	return p.createConnection(localIP, targetIP, false)
 }
 
@@ -441,7 +445,8 @@ func (p *domainConnPool) runWarmupJobs(jobs []ipWarmupJob) {
 }
 
 func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
-	localIP, _ := p.getLocalIP()
+	// 根据目标IP类型选择相应的本地IP
+	localIP := p.getLocalIPForTarget(targetIP, isIPv6)
 	connMeta, err := p.createConnection(localIP, targetIP, true)
 	if err != nil {
 		fmt.Printf("[预热] 连接创建失败 [%s]: %v\n", targetIP, err)
@@ -601,6 +606,31 @@ func (p *domainConnPool) getLocalIP() (string, bool) {
 
 	return "", false
 }
+
+// getLocalIPForTarget 根据目标IP类型返回相应的本地IP
+func (p *domainConnPool) getLocalIPForTarget(targetIP string, isTargetIPv6 bool) string {
+	if isTargetIPv6 {
+		// 目标是IPv6，优先使用IPv6本地地址
+		if p.localIPv6Pool != nil {
+			if ip := p.localIPv6Pool.GetIP(); ip != nil {
+				if ip.To16() != nil && ip.To4() == nil {
+					return ip.String()
+				}
+			}
+		}
+		// 如果没有IPv6本地地址，返回空字符串，让系统自动选择
+		return ""
+	} else {
+		// 目标是IPv4，使用IPv4本地地址
+		if p.localIPv4Pool != nil {
+			if ip := p.localIPv4Pool.GetIP(); ip != nil {
+				return ip.String()
+			}
+		}
+		// 如果没有IPv4本地地址，返回空字符串，让系统自动选择
+		return ""
+	}
+}
 func (p *domainConnPool) createConnectionWithFallback(skipWhitelistCheck bool) (*ConnMetadata, string, error) {
 	p.ipListMutex.RLock()
 	currentIPv6 := append([]string(nil), p.targetIPv6List...)
@@ -636,11 +666,8 @@ func (p *domainConnPool) createConnectionWithFallback(skipWhitelistCheck bool) (
 
 	for _, idx := range order {
 		candidate := candidates[idx]
-		localIP, isLocalIPv6 := p.getLocalIP()
-		if candidate.isIPv6 && localIP != "" && !isLocalIPv6 {
-			// 避免将IPv6目标绑定到IPv4地址
-			localIP = ""
-		}
+		// 根据目标IP类型选择相应的本地IP
+		localIP := p.getLocalIPForTarget(candidate.ip, candidate.isIPv6)
 		connMeta, err := p.createConnection(localIP, candidate.ip, skipWhitelistCheck)
 		if err == nil {
 			return connMeta, candidate.ip, nil

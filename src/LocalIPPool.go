@@ -211,7 +211,7 @@ func (p *LocalIPPool) producer() { // IPv6地址生产者方法
 }
 
 // generateRandomIPInSubnet 在给定的IPv6子网内生成一个随机的IP地址。
-// 它通过保持子网前缀不变，并随机生成主机部分来实现。
+// 对于 /64 子网，只使用前64位（子网前缀），主机部分使用简单的16进制表示。
 func (p *LocalIPPool) generateRandomIPInSubnet() net.IP { // 生成子网内随机IPv6地址的方法
 	// 复制前缀以避免修改原始数据
 	prefix := make(net.IP, len(p.ipv6Subnet.IP)) // 创建前缀副本
@@ -221,19 +221,37 @@ func (p *LocalIPPool) generateRandomIPInSubnet() net.IP { // 生成子网内随�
 	ones, total := p.ipv6Subnet.Mask.Size() // 获取子网掩码大小
 	hostBits := total - ones                // 计算主机位数
 
-	// 使用加密安全的随机数生成器生成一个覆盖主机位的大整数。
-	randInt, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), uint(hostBits))) // 生成随机大整数
-	if err != nil {                                                                        // 如果生成失败
-		// 在极罕见的情况下，如果读取系统随机源失败，则回退到伪随机。
-		// 这种情况在正常系统中几乎不会发生。
-		randInt = big.NewInt(p.rand.Int63()) // 使用伪随机数生成器
-	}
-	randBytes := randInt.Bytes() // 获取随机数的字节表示
+	// 对于 /64 子网，使用随机的16进制后缀（如 ::a1b2, ::c3d4, ::ef56 等）
+	if ones == 64 {
+		// 生成一个随机的16位16进制数作为后缀（范围 0x0001 到 0xFFFF）
+		// 这样可以生成类似 2607:8700:5500:2943::a1b2, 2607:8700:5500:2943::c3d4 等地址
+		suffix := uint16(p.rand.Intn(0xFFFF) + 1) // 生成 1 到 65535 之间的随机数（16进制）
+		
+		// 将后缀填充到IPv6地址的后64位（最后16位）
+		// IPv6地址是16字节，前8字节是前缀，后8字节是主机部分
+		// 我们只使用最后2字节（16位）作为随机的16进制后缀
+		prefix[14] = byte(suffix >> 8)  // 高字节（16进制高位）
+		prefix[15] = byte(suffix & 0xFF) // 低字节（16进制低位）
+		// 前面的字节保持为0（即 :: 的表示）
+		for i := 8; i < 14; i++ {
+			prefix[i] = 0
+		}
+	} else {
+		// 对于非 /64 子网，使用原来的随机生成方式
+		// 使用加密安全的随机数生成器生成一个覆盖主机位的大整数。
+		randInt, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), uint(hostBits))) // 生成随机大整数
+		if err != nil {                                                                        // 如果生成失败
+			// 在极罕见的情况下，如果读取系统随机源失败，则回退到伪随机。
+			// 这种情况在正常系统中几乎不会发生。
+			randInt = big.NewInt(p.rand.Int63()) // 使用伪随机数生成器
+		}
+		randBytes := randInt.Bytes() // 获取随机数的字节表示
 
-	// 将生成的随机字节填充到IP地址的主机部分。
-	// 从后向前填充，以正确处理不同长度的随机数。
-	for i := 0; i < len(randBytes); i++ { // 遍历随机字节数组
-		prefix[total/8-1-i] |= randBytes[len(randBytes)-1-i] // 将随机字节填充到前缀中
+		// 将生成的随机字节填充到IP地址的主机部分。
+		// 从后向前填充，以正确处理不同长度的随机数。
+		for i := 0; i < len(randBytes); i++ { // 遍历随机字节数组
+			prefix[total/8-1-i] |= randBytes[len(randBytes)-1-i] // 将随机字节填充到前缀中
+		}
 	}
 
 	return prefix // 返回生成的IPv6地址
