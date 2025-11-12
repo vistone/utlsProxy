@@ -1,5 +1,5 @@
 [ServerConfig]
-Version="v1.0.9"
+Version="v1.0.10"
 ServerPort=9091
 
 [DNSDomain]

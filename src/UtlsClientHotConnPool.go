@@ -200,7 +200,22 @@ func (p *domainConnPool) createConnection(localIP, targetIP string, skipWhitelis
 		if localIPAddr == nil {
 			return nil, fmt.Errorf("无效的本地IP地址: %s", localIP)
 		}
-		dialer.LocalAddr = &net.TCPAddr{IP: localIPAddr, Port: 0}
+		
+		// 检查本地IP和目标IP的类型是否匹配
+		targetIPAddr := net.ParseIP(targetIP)
+		if targetIPAddr != nil {
+			localIsIPv6 := localIPAddr.To4() == nil && localIPAddr.To16() != nil
+			targetIsIPv6 := targetIPAddr.To4() == nil && targetIPAddr.To16() != nil
+			
+			// 如果类型不匹配，不绑定本地IP，让系统自动选择
+			if localIsIPv6 != targetIsIPv6 {
+				localIP = "" // 清空本地IP，让系统自动选择
+			} else {
+				dialer.LocalAddr = &net.TCPAddr{IP: localIPAddr, Port: 0}
+			}
+		} else {
+			dialer.LocalAddr = &net.TCPAddr{IP: localIPAddr, Port: 0}
+		}
 	}
 
 	// 尝试使用指定的本地IP连接
@@ -208,7 +223,8 @@ func (p *domainConnPool) createConnection(localIP, targetIP string, skipWhitelis
 	if err != nil {
 		// 如果绑定本地IP失败（通常是IPv6地址未在系统上配置），尝试不绑定本地IP
 		if localIP != "" && (strings.Contains(err.Error(), "cannot assign requested address") || 
-			strings.Contains(err.Error(), "bind: cannot assign requested address")) {
+			strings.Contains(err.Error(), "bind: cannot assign requested address") ||
+			strings.Contains(err.Error(), "no suitable address found")) {
 			// 回退到不绑定本地IP的方式
 			dialerWithoutLocal := net.Dialer{Timeout: p.healthCheckClient.DialTimeout}
 			tcpConn, err = dialerWithoutLocal.Dial("tcp", net.JoinHostPort(targetIP, p.port))
