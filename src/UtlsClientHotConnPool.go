@@ -221,6 +221,17 @@ func (p *domainConnPool) createConnection(localIP, targetIP string, skipWhitelis
 	// 尝试使用指定的本地IP连接
 	tcpConn, err := dialer.Dial("tcp", net.JoinHostPort(targetIP, p.port))
 	if err != nil {
+		// 如果连接失败且使用了IPv6本地地址，释放该地址
+		if localIP != "" {
+			localIPAddr := net.ParseIP(localIP)
+			if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+				// 是IPv6地址，连接失败时释放
+				if p.localIPv6Pool != nil {
+					p.localIPv6Pool.ReleaseIP(localIPAddr)
+				}
+			}
+		}
+		
 		// 如果绑定本地IP失败（通常是IPv6地址未在系统上配置），尝试不绑定本地IP
 		if localIP != "" && (strings.Contains(err.Error(), "cannot assign requested address") || 
 			strings.Contains(err.Error(), "bind: cannot assign requested address") ||
@@ -252,6 +263,15 @@ func (p *domainConnPool) createConnection(localIP, targetIP string, skipWhitelis
 
 	if err := uConn.Handshake(); err != nil {
 		_ = uConn.Close()
+		// TLS握手失败，如果是IPv6地址，释放它
+		if localIP != "" {
+			localIPAddr := net.ParseIP(localIP)
+			if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+				if p.localIPv6Pool != nil {
+					p.localIPv6Pool.ReleaseIP(localIPAddr)
+				}
+			}
+		}
 		return nil, fmt.Errorf("TLS握手失败: %w", err)
 	}
 
@@ -383,12 +403,39 @@ func (p *domainConnPool) ReturnConn(connMeta *ConnMetadata, statusCode int) erro
 	if statusCode == 200 {
 		p.ipAccessControl.AddIP(connMeta.TargetIP, true)
 		p.returnToPool(connMeta, p.healthyConns)
+		// 请求成功，释放IPv6地址以便下次使用新的地址
+		if connMeta.LocalIP != "" {
+			localIPAddr := net.ParseIP(connMeta.LocalIP)
+			if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+				if p.localIPv6Pool != nil {
+					p.localIPv6Pool.ReleaseIP(localIPAddr)
+				}
+			}
+		}
 	} else if statusCode == 403 {
 		p.ipAccessControl.AddIP(connMeta.TargetIP, false)
 		_ = connMeta.Conn.Close()
 		fmt.Printf("[连接池] IP加入黑名单 [%s]，连接已关闭\n", connMeta.TargetIP)
+		// 请求失败（403），释放IPv6地址
+		if connMeta.LocalIP != "" {
+			localIPAddr := net.ParseIP(connMeta.LocalIP)
+			if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+				if p.localIPv6Pool != nil {
+					p.localIPv6Pool.ReleaseIP(localIPAddr)
+				}
+			}
+		}
 	} else {
 		p.returnToPool(connMeta, p.unhealthyConns)
+		// 其他错误状态码，也释放IPv6地址
+		if connMeta.LocalIP != "" {
+			localIPAddr := net.ParseIP(connMeta.LocalIP)
+			if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+				if p.localIPv6Pool != nil {
+					p.localIPv6Pool.ReleaseIP(localIPAddr)
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -466,6 +513,7 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 	connMeta, err := p.createConnection(localIP, targetIP, true)
 	if err != nil {
 		fmt.Printf("[预热] 连接创建失败 [%s]: %v\n", targetIP, err)
+		// 连接失败，IPv6地址已在createConnection中释放
 		return
 	}
 
@@ -474,6 +522,15 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 		if err != nil {
 			_ = connMeta.Conn.Close()
 			fmt.Printf("[预热] 健康检查失败 [%s]: %v\n", targetIP, err)
+			// 健康检查失败，释放IPv6地址
+			if connMeta.LocalIP != "" {
+				localIPAddr := net.ParseIP(connMeta.LocalIP)
+				if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+					if p.localIPv6Pool != nil {
+						p.localIPv6Pool.ReleaseIP(localIPAddr)
+					}
+				}
+			}
 			return
 		}
 		if statusCode != 200 || bodyLen != 13 {
@@ -482,6 +539,15 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 			if statusCode == 403 {
 				p.ipAccessControl.AddIP(targetIP, false)
 			}
+			// 状态码不是200，释放IPv6地址
+			if connMeta.LocalIP != "" {
+				localIPAddr := net.ParseIP(connMeta.LocalIP)
+				if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+					if p.localIPv6Pool != nil {
+						p.localIPv6Pool.ReleaseIP(localIPAddr)
+					}
+				}
+			}
 			return
 		}
 	}
@@ -489,6 +555,15 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 	p.ipAccessControl.AddIP(targetIP, true)
 	p.returnToPool(connMeta, p.healthyConns)
 	fmt.Printf("[预热] 成功 [%s]: %s -> 连接已放入健康池\n", targetIP, connMeta.Protocol)
+	// 预热成功，释放IPv6地址以便下次使用新的地址
+	if connMeta.LocalIP != "" {
+		localIPAddr := net.ParseIP(connMeta.LocalIP)
+		if localIPAddr != nil && localIPAddr.To4() == nil && localIPAddr.To16() != nil {
+			if p.localIPv6Pool != nil {
+				p.localIPv6Pool.ReleaseIP(localIPAddr)
+			}
+		}
+	}
 }
 
 func (p *domainConnPool) healthCheckWithConn(connMeta *ConnMetadata, targetIP string) (int, int, error) {
@@ -578,6 +653,13 @@ func (p *domainConnPool) refreshTargetIPList() {
 	p.targetIPv4List = newIPv4
 	p.targetIPv6List = newIPv6
 	p.knownTargetIPs = newKnown
+	
+	// 更新IPv6地址池的目标IP数量（与目标IPv6地址数量保持一致）
+	totalTargetIPs := len(newIPv6) + len(newIPv4)
+	if p.localIPv6Pool != nil && totalTargetIPs > 0 {
+		p.localIPv6Pool.SetTargetIPCount(totalTargetIPs)
+	}
+	
 	p.ipListMutex.Unlock()
 }
 func (p *domainConnPool) startBackgroundTasks() {

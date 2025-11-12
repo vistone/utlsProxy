@@ -19,6 +19,10 @@ import ( // 导入所需的标准库
 type IPPool interface { // 定义IPPool接口
 	// GetIP 从池中获取一个可用的IP地址。
 	GetIP() net.IP // 获取一个IP地址的方法
+	// ReleaseIP 释放一个IPv6地址（删除并创建新的），仅对IPv6地址有效
+	ReleaseIP(ip net.IP) // 释放IP地址的方法
+	// SetTargetIPCount 设置目标IP数量（用于IPv6地址池动态调整）
+	SetTargetIPCount(count int) // 设置目标IP数量方法
 	// Closer io.Closer 接口的实现，允许使用 defer pool.Close() 的方式优雅关闭。
 	io.Closer // 嵌入Closer接口，用于资源清理
 }
@@ -45,6 +49,18 @@ type LocalIPPool struct { // 定义LocalIPPool结构体，实现IPPool接口
 	// createdIPv6Addrs 存储已创建的IPv6地址，用于清理
 	createdIPv6Addrs map[string]bool // 已创建的IPv6地址映射
 	createdIPv6Mutex sync.RWMutex    // 保护已创建地址映射的互斥锁
+	// usedIPv6Addrs 存储正在使用的IPv6地址
+	usedIPv6Addrs map[string]bool // 正在使用的IPv6地址映射
+	usedIPv6Mutex sync.RWMutex    // 保护正在使用地址映射的互斥锁
+	// activeIPv6Addrs 存储当前活跃的IPv6地址（已创建且在系统上）
+	activeIPv6Addrs map[string]bool // 活跃的IPv6地址映射
+	activeIPv6Mutex sync.RWMutex    // 保护活跃地址映射的互斥锁
+	// batchSize 批量创建/删除的地址数量
+	batchSize int // 批量操作大小
+	// minActiveAddrs 最小活跃地址数量
+	minActiveAddrs int // 最小活跃地址数
+	// maxActiveAddrs 最大活跃地址数量
+	maxActiveAddrs int // 最大活跃地址数
 }
 
 // NewLocalIPPool 创建并初始化一个智能IP池。
@@ -135,6 +151,11 @@ func NewLocalIPPool(staticIPv4s []string, ipv6SubnetCIDR string) (IPPool, error)
 				pool.ipv6Subnet = subnet                         // 设置IPv6子网
 				pool.ipv6Queue = make(chan net.IP, 100)          // 预生成100个IPv6地址作为缓冲区。
 				pool.createdIPv6Addrs = make(map[string]bool)    // 初始化已创建地址映射
+				pool.usedIPv6Addrs = make(map[string]bool)       // 初始化正在使用地址映射
+				pool.activeIPv6Addrs = make(map[string]bool)     // 初始化活跃地址映射
+				pool.batchSize = 10                              // 默认批量操作大小：10个地址
+				pool.minActiveAddrs = 0                           // 最小活跃地址数（动态设置）
+				pool.maxActiveAddrs = 0                           // 最大活跃地址数（动态设置）
 				// 检测IPv6接口名称
 				pool.ipv6Interface = detectIPv6Interface(subnet)
 				if pool.ipv6Interface == "" {
@@ -143,7 +164,10 @@ func NewLocalIPPool(staticIPv4s []string, ipv6SubnetCIDR string) (IPPool, error)
 				} else {
 					fmt.Printf("[IP池] 检测到IPv6接口: %s\n", pool.ipv6Interface)
 				}
+				// 启动时清理旧的IPv6地址
+				pool.cleanupOldIPv6Addresses(subnet)
 				go pool.producer()                               // 在后台启动IPv6地址生产者。
+				go pool.manageIPv6Addresses()                    // 在后台启动IPv6地址管理器（热加载）
 			}
 		} else { // 如果子网未配置
 			fmt.Printf("[IP池] 警告: 未在当前网络环境中检测到指定的IPv6子网 %s，已降级为仅IPv4模式。\n", ipv6SubnetCIDR) // 输出日志
@@ -183,6 +207,10 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 		// 确保IPv6地址在系统上已创建
 		if ip != nil {
 			p.ensureIPv6AddressCreated(ip)
+			// 标记地址为正在使用
+			p.usedIPv6Mutex.Lock()
+			p.usedIPv6Addrs[ip.String()] = true
+			p.usedIPv6Mutex.Unlock()
 		}
 		
 		return ip
@@ -557,6 +585,9 @@ func (p *LocalIPPool) ensureIPv6AddressCreated(ip net.IP) {
 		p.createdIPv6Mutex.Lock()
 		p.createdIPv6Addrs[ipStr] = true
 		p.createdIPv6Mutex.Unlock()
+		p.activeIPv6Mutex.Lock()
+		p.activeIPv6Addrs[ipStr] = true
+		p.activeIPv6Mutex.Unlock()
 		return
 	}
 
@@ -581,6 +612,11 @@ func (p *LocalIPPool) ensureIPv6AddressCreated(ip net.IP) {
 	p.createdIPv6Mutex.Lock()
 	p.createdIPv6Addrs[ipStr] = true
 	p.createdIPv6Mutex.Unlock()
+
+	// 记录为活跃地址
+	p.activeIPv6Mutex.Lock()
+	p.activeIPv6Addrs[ipStr] = true
+	p.activeIPv6Mutex.Unlock()
 
 	fmt.Printf("[IP池] 已创建IPv6地址: %s/%s\n", ipStr, interfaceName)
 }
@@ -640,4 +676,314 @@ func (p *LocalIPPool) cleanupCreatedIPv6Addresses() {
 
 	// 清空映射
 	p.createdIPv6Addrs = make(map[string]bool)
+}
+
+// ReleaseIP 释放一个IPv6地址（删除并创建新的），仅对IPv6地址有效
+func (p *LocalIPPool) ReleaseIP(ip net.IP) {
+	if ip == nil {
+		return
+	}
+
+	// 只处理IPv6地址
+	if ip.To4() != nil {
+		return // IPv4地址不需要释放
+	}
+
+	ipStr := ip.String()
+
+	// 检查是否正在使用
+	p.usedIPv6Mutex.Lock()
+	isUsed := p.usedIPv6Addrs[ipStr]
+	delete(p.usedIPv6Addrs, ipStr)
+	p.usedIPv6Mutex.Unlock()
+
+	if !isUsed {
+		return // 地址未在使用中，无需释放
+	}
+
+	// 删除IPv6地址
+	p.mu.RLock()
+	interfaceName := p.ipv6Interface
+	p.mu.RUnlock()
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net"
+	}
+
+	// 使用 ip addr del 命令删除地址
+	cmd := exec.Command("ip", "addr", "del", ipStr+"/128", "dev", interfaceName)
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("[IP池] 警告: 删除IPv6地址 %s 失败: %v\n", ipStr, err)
+	} else {
+		fmt.Printf("[IP池] 已释放IPv6地址: %s/%s\n", ipStr, interfaceName)
+	}
+
+	// 从已创建地址映射中移除
+	p.createdIPv6Mutex.Lock()
+	delete(p.createdIPv6Addrs, ipStr)
+	p.createdIPv6Mutex.Unlock()
+
+	// 从活跃地址映射中移除
+	p.activeIPv6Mutex.Lock()
+	delete(p.activeIPv6Addrs, ipStr)
+	p.activeIPv6Mutex.Unlock()
+}
+
+// cleanupOldIPv6Addresses 清理子网下的所有旧IPv6地址（启动时调用）
+func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
+	p.mu.RLock()
+	interfaceName := p.ipv6Interface
+	p.mu.RUnlock()
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net"
+	}
+
+	// 获取接口上所有的IPv6地址
+	cmd := exec.Command("ip", "-6", "addr", "show", "dev", interfaceName)
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("[IP池] 警告: 无法获取接口 %s 的IPv6地址列表: %v\n", interfaceName, err)
+		return
+	}
+
+	// 解析输出，找到所有属于子网的IPv6地址
+	lines := strings.Split(string(output), "\n")
+	cleaned := 0
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "inet6 ") {
+			continue
+		}
+
+		// 解析地址，格式如: inet6 2607:8700:5500:2943::2ca9/128 scope global
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+
+		addrStr := strings.Split(parts[1], "/")[0] // 提取IP地址部分
+		ip := net.ParseIP(addrStr)
+		if ip == nil {
+			continue
+		}
+
+		// 检查地址是否属于子网
+		if subnet.Contains(ip) {
+			// 删除地址
+			delCmd := exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", interfaceName)
+			if err := delCmd.Run(); err != nil {
+				// 删除失败，记录但不阻塞
+				fmt.Printf("[IP池] 警告: 清理旧IPv6地址 %s 失败: %v\n", ip.String(), err)
+			} else {
+				cleaned++
+			}
+		}
+	}
+
+	if cleaned > 0 {
+		fmt.Printf("[IP池] 启动时已清理 %d 个旧IPv6地址\n", cleaned)
+	}
+}
+
+// manageIPv6Addresses 后台管理IPv6地址的热加载（动态创建和删除）
+func (p *LocalIPPool) manageIPv6Addresses() {
+	ticker := time.NewTicker(30 * time.Second) // 每30秒检查一次
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+			p.adjustIPv6AddressPool()
+		}
+	}
+}
+
+// adjustIPv6AddressPool 调整IPv6地址池大小（热加载）
+func (p *LocalIPPool) adjustIPv6AddressPool() {
+	p.mu.RLock()
+	hasSupport := p.hasIPv6Support
+	subnet := p.ipv6Subnet
+	interfaceName := p.ipv6Interface
+	batchSize := p.batchSize
+	minActive := p.minActiveAddrs
+	maxActive := p.maxActiveAddrs
+	p.mu.RUnlock()
+
+	if !hasSupport || subnet == nil {
+		return
+	}
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net"
+	}
+
+	// 统计当前活跃地址数量
+	p.activeIPv6Mutex.RLock()
+	activeCount := len(p.activeIPv6Addrs)
+	p.activeIPv6Mutex.RUnlock()
+
+	// 统计正在使用的地址数量
+	p.usedIPv6Mutex.RLock()
+	usedCount := len(p.usedIPv6Addrs)
+	p.usedIPv6Mutex.RUnlock()
+
+	// 如果目标IP数量未设置，跳过调整
+	if minActive == 0 || maxActive == 0 {
+		return
+	}
+
+	// 计算需要调整的数量
+	availableCount := activeCount - usedCount
+
+	// 如果活跃地址太少，批量创建新地址
+	if activeCount < minActive {
+		needed := minActive - activeCount
+		if needed > batchSize {
+			needed = batchSize
+		}
+		p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
+	}
+
+	// 如果活跃地址太多且可用地址充足，批量删除多余的地址
+	if activeCount > maxActive && availableCount > batchSize {
+		excess := activeCount - maxActive
+		if excess > batchSize {
+			excess = batchSize
+		}
+		p.batchDeleteIPv6Addresses(excess, interfaceName)
+	}
+}
+
+// batchCreateIPv6Addresses 批量创建IPv6地址
+func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, interfaceName string) {
+	created := 0
+	for i := 0; i < count; i++ {
+		ip := p.generateRandomIPInSubnet()
+		if ip == nil {
+			continue
+		}
+
+		ipStr := ip.String()
+
+		// 检查地址是否已存在
+		if p.isIPv6AddressExists(ipStr) {
+			// 地址已存在，记录但不创建
+			p.createdIPv6Mutex.Lock()
+			p.createdIPv6Addrs[ipStr] = true
+			p.createdIPv6Mutex.Unlock()
+			p.activeIPv6Mutex.Lock()
+			p.activeIPv6Addrs[ipStr] = true
+			p.activeIPv6Mutex.Unlock()
+			continue
+		}
+
+		// 创建地址
+		cmd := exec.Command("ip", "addr", "add", ipStr+"/128", "dev", interfaceName)
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("[IP池] 警告: 批量创建IPv6地址 %s 失败: %v\n", ipStr, err)
+			continue
+		}
+
+		// 记录地址
+		p.createdIPv6Mutex.Lock()
+		p.createdIPv6Addrs[ipStr] = true
+		p.createdIPv6Mutex.Unlock()
+		p.activeIPv6Mutex.Lock()
+		p.activeIPv6Addrs[ipStr] = true
+		p.activeIPv6Mutex.Unlock()
+
+		created++
+	}
+
+	if created > 0 {
+		fmt.Printf("[IP池] 热加载: 批量创建了 %d 个IPv6地址\n", created)
+	}
+}
+
+// batchDeleteIPv6Addresses 批量删除IPv6地址（删除未使用的地址）
+func (p *LocalIPPool) batchDeleteIPv6Addresses(count int, interfaceName string) {
+	p.activeIPv6Mutex.RLock()
+	p.usedIPv6Mutex.RLock()
+
+	// 找出未使用的地址
+	unusedAddrs := make([]string, 0)
+	for addr := range p.activeIPv6Addrs {
+		if !p.usedIPv6Addrs[addr] {
+			unusedAddrs = append(unusedAddrs, addr)
+		}
+	}
+
+	p.usedIPv6Mutex.RUnlock()
+	p.activeIPv6Mutex.RUnlock()
+
+	// 限制删除数量
+	if len(unusedAddrs) > count {
+		unusedAddrs = unusedAddrs[:count]
+	}
+
+	deleted := 0
+	for _, ipStr := range unusedAddrs {
+		// 删除地址
+		cmd := exec.Command("ip", "addr", "del", ipStr+"/128", "dev", interfaceName)
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("[IP池] 警告: 批量删除IPv6地址 %s 失败: %v\n", ipStr, err)
+			continue
+		}
+
+		// 从映射中移除
+		p.createdIPv6Mutex.Lock()
+		delete(p.createdIPv6Addrs, ipStr)
+		p.createdIPv6Mutex.Unlock()
+		p.activeIPv6Mutex.Lock()
+		delete(p.activeIPv6Addrs, ipStr)
+		p.activeIPv6Mutex.Unlock()
+
+		deleted++
+	}
+
+	if deleted > 0 {
+		fmt.Printf("[IP池] 热加载: 批量删除了 %d 个IPv6地址\n", deleted)
+	}
+}
+
+// SetTargetIPCount 设置目标IP数量（用于IPv6地址池动态调整）
+func (p *LocalIPPool) SetTargetIPCount(count int) {
+	if count <= 0 {
+		return
+	}
+
+	p.mu.Lock()
+	p.minActiveAddrs = count  // 最小活跃地址数 = 目标IP数量
+	p.maxActiveAddrs = count * 2 // 最大活跃地址数 = 目标IP数量的2倍（留有余量）
+	p.mu.Unlock()
+
+	// 如果支持IPv6，立即触发一次调整
+	if p.hasIPv6Support && p.ipv6Subnet != nil {
+		p.adjustIPv6AddressPool()
+		// 如果当前活跃地址不足，立即批量创建
+		p.activeIPv6Mutex.RLock()
+		activeCount := len(p.activeIPv6Addrs)
+		p.activeIPv6Mutex.RUnlock()
+
+		if activeCount < count {
+			needed := count - activeCount
+			if needed > p.batchSize {
+				needed = p.batchSize
+			}
+			p.mu.RLock()
+			subnet := p.ipv6Subnet
+			interfaceName := p.ipv6Interface
+			p.mu.RUnlock()
+			if interfaceName == "" {
+				interfaceName = "ipv6net"
+			}
+			p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
+		}
+	}
+
+	fmt.Printf("[IP池] 已设置目标IP数量: %d，最小活跃地址: %d，最大活跃地址: %d\n", count, count, count*2)
 }
