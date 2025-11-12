@@ -122,8 +122,8 @@ func main() {
 							bodyPreview += "..."
 						}
 
-						// 保存响应体到文件
-						filename := fmt.Sprintf("task_%d_%d_%d.bin", idx, attempt, time.Now().UnixNano())
+						// 保存响应体到文件（gzip格式）
+						filename := fmt.Sprintf("task_%d_%d_%d.gz", idx, attempt, time.Now().UnixNano())
 						filePath := filepath.Join(outputDir, filename)
 						if err := os.WriteFile(filePath, resp.Body, 0644); err != nil {
 							log.Printf("[任务 %d] 警告: 保存响应体到文件失败: %v", idx, err)
