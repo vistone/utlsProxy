@@ -129,7 +129,10 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 		pathSuffix = "/" + pathSuffix
 	}
 
+	// 服务器端快速超时：2秒，超过2秒直接返回让客户端重试
+	const serverTimeout = 2 * time.Second
 	const maxAttempts = 5
+	
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
@@ -141,15 +144,17 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 		targetIP := allowedIPs[index]
 		workID := fmt.Sprintf("grpc-%s-%d", clientID, attempt)
 
-		resp, _, err, duration := c.performRequestAttempt(0, 0, attempt, targetIP, pathSuffix, workID, maxTaskDuration)
+		// 使用2秒超时，快速失败让客户端重试
+		resp, _, err, duration := c.performRequestAttempt(0, 0, attempt, targetIP, pathSuffix, workID, serverTimeout)
 		if err != nil {
 			log.Printf("[gRPC] 任务(%s) 第 %d 次请求失败 [目标IP: %s, 耗时: %v]: %v", clientID, attempt, targetIP, duration, err)
 			continue
 		}
 
-		if duration > maxTaskDuration {
-			log.Printf("[gRPC] 任务(%s) 第 %d 次超时 [目标IP: %s, 耗时: %v]", clientID, attempt, targetIP, duration)
-			continue
+		// 如果超过2秒，直接返回超时错误，让客户端重试
+		if duration > serverTimeout {
+			log.Printf("[gRPC] 任务(%s) 第 %d 次超时 [目标IP: %s, 耗时: %v]，返回超时让客户端重试", clientID, attempt, targetIP, duration)
+			return 0, nil, fmt.Errorf("请求超时（耗时 %v，超过 %v），请客户端重试", duration, serverTimeout)
 		}
 
 		if resp.StatusCode == 200 {
