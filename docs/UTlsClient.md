@@ -6,11 +6,13 @@
 
 - **TLS指纹伪装**：使用UTLS库模拟真实浏览器的TLS握手特征，有效规避TLS指纹检测
 - **多协议支持**：自动支持HTTP/2和HTTP/1.1协议，根据服务器能力自动协商
+- **HTTP/2连接复用**：通过`http2ClientConns`缓存实现HTTP/2连接复用，减少连接建立开销
 - **IPv4/IPv6双栈**：完整支持IPv4和IPv6地址，自动识别和格式化
 - **智能连接降级**：IP直连失败时自动降级到域名连接，提高连接成功率
 - **本地IP绑定**：支持指定本地IP地址进行连接，适用于多网卡环境
 - **自动请求头填充**：自动填充User-Agent和Accept-Language等请求头，模拟真实浏览器行为
 - **信息性响应处理**：正确处理HTTP 1xx信息性响应，确保获取最终响应
+- **热连接池集成**：支持与`HotConnPool`集成，实现连接池级别的连接复用
 
 ## 架构设计
 
@@ -1269,19 +1271,40 @@ if err != nil {
 
 ### 1. 连接复用
 
-**UTlsClient 本身不支持连接复用**，每次 `Do` 调用都会：
-1. 创建新的TCP连接
-2. 执行TLS握手（HTTPS）
-3. 发送请求
-4. 读取响应
-5. 关闭连接
+**UTlsClient 的连接复用机制**：
+
+#### HTTP/2连接复用（内置支持）
+
+`UTlsClient` 内置了HTTP/2连接复用机制，通过 `http2ClientConns` 缓存实现：
+
+1. **自动缓存**：当使用同一个 `utls.UConn` 发送HTTP/2请求时，会自动缓存 `http2.ClientConn`
+2. **智能复用**：下次使用相同的 `utls.UConn` 时，直接复用缓存的 `http2.ClientConn`，无需重新创建
+3. **失效清理**：当连接失败（如 `unexpected EOF`、`403错误`）时，自动从缓存中移除失效的连接
 
 **性能影响**：
-- 每次请求的TCP握手开销：~10-50ms
-- 每次HTTPS请求的TLS握手开销：~50-200ms
-- 总开销：~60-250ms/请求
+- 首次请求：TCP握手 + TLS握手 + HTTP/2连接建立：~60-250ms
+- 复用请求：仅HTTP/2请求发送：~10-50ms
+- **性能提升**：复用场景下可减少80-90%的连接建立时间
 
-**解决方案：使用热连接池**
+**使用示例**：
+```go
+client := src.NewUTlsClient()
+
+// 第一次请求：建立连接并缓存http2.ClientConn
+req1 := &src.UTlsRequest{...}
+resp1, err := client.Do(req1) // 建立连接，缓存http2.ClientConn
+
+// 第二次请求：如果使用相同的utls.UConn，会复用http2.ClientConn
+req2 := &src.UTlsRequest{...}
+resp2, err := client.Do(req2) // 复用缓存的http2.ClientConn
+```
+
+**注意**：HTTP/2连接复用需要配合 `HotConnPool` 使用，因为：
+- `UTlsClient` 每次 `Do` 调用默认会创建新连接并关闭
+- 只有通过 `HotConnPool` 获取的连接才会被复用
+- `HotConnPool` 管理 `utls.UConn` 的生命周期，`UTlsClient` 管理 `http2.ClientConn` 的缓存
+
+#### 热连接池集成（推荐）
 
 对于高频请求场景（QPS > 10），强烈建议使用 `UtlsClientHotConnPool`：
 
@@ -1290,27 +1313,26 @@ if err != nil {
 pool, err := src.NewDomainHotConnPool(config)
 defer pool.Close()
 
+// 设置热连接池
+client.HotConnPool = pool
+
 // 预热连接池
 pool.Warmup()
 
-// 获取连接（从池中复用）
-conn, err := pool.GetConn()
-
-// 使用连接发送请求
-// ... 发送HTTP请求 ...
-
-// 归还连接（连接会被复用）
-pool.ReturnConn(conn, statusCode)
+// 使用客户端发送请求（自动使用连接池）
+req := &src.UTlsRequest{...}
+resp, err := client.Do(req) // 自动从连接池获取连接，HTTP/2连接会被复用
 ```
 
 **热连接池的优势**：
 - ✅ 连接复用：减少TCP和TLS握手开销
+- ✅ HTTP/2复用：自动复用HTTP/2连接，进一步提升性能
 - ✅ 连接健康管理：自动区分健康/不健康连接
 - ✅ IP健康监控：自动管理IP黑白名单
 - ✅ 预热机制：启动时预热连接池
-- ✅ 性能提升：高频场景下可提升50-80%的吞吐量
+- ✅ 性能提升：高频场景下可提升50-90%的吞吐量
 
-详细使用说明请参考：[热连接池文档](./HotConnPool.md)
+详细使用说明请参考：[热连接池文档](./UtlsClientHotConnPool.md)
 
 ### 2. 指纹选择
 
@@ -1332,16 +1354,24 @@ pool.ReturnConn(conn, statusCode)
 
 ### 1. 连接管理策略
 
-**UTlsClient 每次请求都会创建新连接并在完成后关闭**，这是其设计理念：
+**UTlsClient 的连接管理策略**：
+
+#### 独立使用（无连接池）
+
+当未设置 `HotConnPool` 时：
 - ✅ **优点**：简化使用，无需管理连接状态，避免连接泄漏
 - ⚠️ **缺点**：每次请求都需要TCP握手和TLS握手，开销较大
 - 📌 **适用场景**：低频请求、一次性请求、测试场景
+- **HTTP/2复用**：不支持（因为连接会被关闭）
 
-**如果需要连接复用和热连接**：
-- 使用 `UtlsClientHotConnPool`（热连接池）
-- 提供连接池管理、连接复用、IP健康监控等功能
-- 适合高频请求场景，可显著减少握手开销
-- 详细文档：[热连接池文档](./HotConnPool.md)
+#### 配合热连接池使用（推荐）
+
+当设置 `HotConnPool` 时：
+- ✅ **优点**：连接复用，减少握手开销，支持HTTP/2连接复用
+- ✅ **HTTP/2复用**：自动缓存和复用 `http2.ClientConn`，进一步提升性能
+- ✅ **连接管理**：连接池自动管理连接生命周期
+- 📌 **适用场景**：高频请求、生产环境、需要高性能的场景
+- **详细文档**：[热连接池文档](./UtlsClientHotConnPool.md)
 
 ### 2. 超时设置
 
