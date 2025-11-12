@@ -23,7 +23,7 @@ func main() {
 		requestTimeout  = 20 * time.Second // 增加超时时间以应对慢速IP
 		rpcMaxAttempts  = 5
 		rpcRetryDelay   = 50 * time.Millisecond
-		outputDir       = "./taskclient_data" // 响应体保存目录
+		outputDir       = "/Volumes/SSD/taskclient_data" // 响应体保存目录
 	)
 
 	if repeatCount <= 0 {
