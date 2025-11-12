@@ -44,10 +44,22 @@ func (c *Crawler) startGRPCServer() error {
 }
 
 func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*taskapi.TaskResponse, error) {
+	grpcStart := time.Now()
+	atomic.AddInt64(&s.crawler.stats.GRPCRequests, 1)
+	
+	// 记录gRPC请求大小（请求体大小）
+	requestSize := int64(len(req.Path))
+	if req.ClientID != "" {
+		requestSize += int64(len(req.ClientID))
+	}
+	atomic.AddInt64(&s.crawler.stats.GRPCRequestBytes, requestSize)
+	
 	if req == nil {
+		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 		return &taskapi.TaskResponse{ErrorMessage: "空请求"}, nil
 	}
 	if req.Path == "" {
+		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 		return &taskapi.TaskResponse{
 			ClientID:     req.ClientID,
 			ErrorMessage: "path 不能为空",
@@ -62,13 +74,31 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	s.crawler.recordTaskStart()
 	defer func() {
 		s.crawler.recordTaskCompletion(time.Since(start))
+		// 记录gRPC请求总耗时
+		grpcDuration := time.Since(grpcStart)
+		atomic.AddInt64(&s.crawler.stats.GRPCDuration, grpcDuration.Microseconds())
 	}()
 
 	statusCode, body, err := s.crawler.handleTaskRequest(ctx, req.ClientID, req.Path)
 	resp.StatusCode = int32(statusCode)
+	
+	// 记录gRPC响应大小
+	responseSize := int64(len(resp.Body))
+	if resp.ErrorMessage != "" {
+		responseSize += int64(len(resp.ErrorMessage))
+	}
+	atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
+	
 	if err != nil {
+		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 		resp.ErrorMessage = err.Error()
 		return resp, nil
+	}
+
+	if statusCode == 200 {
+		atomic.AddInt64(&s.crawler.stats.GRPCSuccess, 1)
+	} else {
+		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 	}
 
 	resp.Body = body

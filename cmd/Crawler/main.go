@@ -53,7 +53,14 @@ type CrawlerStats struct {
 	StartedTasks    int64
 	CompletedTasks  int64
 	CompletedMicros int64
-	StartTime       time.Time
+	// gRPC请求统计
+	GRPCRequests      int64 // gRPC请求总数
+	GRPCSuccess       int64 // gRPC成功请求数
+	GRPCFailed        int64 // gRPC失败请求数
+	GRPCRequestBytes  int64 // gRPC请求总字节数
+	GRPCResponseBytes int64 // gRPC响应总字节数
+	GRPCDuration      int64 // gRPC请求总耗时（微秒）
+	StartTime         time.Time
 }
 
 // SlowIPTracker 用于跟踪响应缓慢的IP
@@ -494,6 +501,23 @@ func (c *Crawler) printStats() {
 	if started > 0 {
 		log.Printf("[统计] 任务派发=%d, 已完成=%d, 平均任务耗时=%v, 未完成=%d",
 			started, completed, avgTaskDuration, started-completed)
+	}
+
+	// gRPC请求统计
+	grpcTotal := atomic.LoadInt64(&stats.GRPCRequests)
+	grpcSuccess := atomic.LoadInt64(&stats.GRPCSuccess)
+	grpcFailed := atomic.LoadInt64(&stats.GRPCFailed)
+	grpcReqBytes := atomic.LoadInt64(&stats.GRPCRequestBytes)
+	grpcRespBytes := atomic.LoadInt64(&stats.GRPCResponseBytes)
+	grpcTotalMicros := atomic.LoadInt64(&stats.GRPCDuration)
+	
+	if grpcTotal > 0 {
+		avgGRPCDuration := time.Duration(0)
+		if grpcTotal > 0 {
+			avgGRPCDuration = time.Duration(grpcTotalMicros/grpcTotal) * time.Microsecond
+		}
+		log.Printf("[统计] gRPC请求总数=%d (成功=%d, 失败=%d), 平均耗时=%v, 请求流量=%d字节, 响应流量=%d字节, 总流量=%d字节",
+			grpcTotal, grpcSuccess, grpcFailed, avgGRPCDuration, grpcReqBytes, grpcRespBytes, grpcReqBytes+grpcRespBytes)
 	}
 }
 
