@@ -88,12 +88,12 @@ func main() {
 			}
 		}
 	}
-	
+
 	// 等待连接就绪（KCP可能需要更长时间，最多等待10秒）
 	// 如果超时，对于KCP连接，允许继续尝试（KCP连接可能不会自动变为READY）
 	initialState := conn.GetState()
 	log.Printf("初始连接状态: %v", initialState)
-	
+
 	if err := waitForReady(conn, 10*time.Second); err != nil {
 		if useKCP {
 			// KCP连接可能不会自动变为READY状态，允许继续尝试
@@ -303,22 +303,46 @@ func main() {
 					}
 
 					// 使用 goroutine 监控请求是否超时
-					done := make(chan bool, 1)
-					var resp *taskapi.TaskResponse
-					var err error
+					type result struct {
+						resp *taskapi.TaskResponse
+						err  error
+					}
+					done := make(chan result, 1)
 
 					go func() {
-						resp, err = currentClient.Execute(ctx, &taskapi.TaskRequest{
+						// 在goroutine中执行请求，避免变量共享问题
+						// 检查连接状态
+						connMutex.Lock()
+						connState := conn.GetState()
+						connMutex.Unlock()
+						if idx < 5 {
+							log.Printf("[任务 %d] 开始执行请求，连接状态: %v", idx, connState)
+						}
+						
+						r, e := currentClient.Execute(ctx, &taskapi.TaskRequest{
 							ClientID: id,
 							Path:     requestPath,
 						})
-						done <- true
+						
+						// 请求完成后检查连接状态
+						connMutex.Lock()
+						afterState := conn.GetState()
+						connMutex.Unlock()
+						if idx < 5 && e != nil {
+							log.Printf("[任务 %d] 请求执行完成，错误: %v，连接状态: %v", idx, e, afterState)
+						}
+						
+						done <- result{resp: r, err: e}
 					}()
 
 					// 等待请求完成或超时
+					var resp *taskapi.TaskResponse
+					var err error
 					select {
-					case <-done:
+					case res := <-done:
 						// 请求完成
+						resp = res.resp
+						err = res.err
 						cancel()
 					case <-ctx.Done():
 						// 请求超时
@@ -345,9 +369,20 @@ func main() {
 							strings.Contains(errStr, "connection error") ||
 							strings.Contains(errStr, "transport is closing") ||
 							strings.Contains(errStr, "connection refused") ||
-							strings.Contains(errStr, "Unavailable")
+							strings.Contains(errStr, "Unavailable") ||
+							strings.Contains(errStr, "the client connection is closing")
 
-						if isConnectionError && attempt < rpcMaxAttempts {
+						// 检查连接状态，只有在连接确实失败时才重连
+						connMutex.Lock()
+						connState := conn.GetState()
+						connMutex.Unlock()
+						
+						// 只有在连接状态是TransientFailure或Shutdown时才重连
+						shouldReconnect := isConnectionError && 
+							(connState == connectivity.TransientFailure || connState == connectivity.Shutdown) &&
+							attempt < rpcMaxAttempts
+
+						if shouldReconnect {
 							// 尝试重连（只在不是最后一次尝试时重连）
 							cancel() // 取消当前上下文
 							if reconnectErr := reconnect(); reconnectErr == nil {
@@ -362,6 +397,12 @@ func main() {
 								// 重新创建上下文
 								ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
 							}
+						} else if isConnectionError && connState == connectivity.Connecting {
+							// 连接正在连接中，等待一段时间后重试
+							cancel()
+							time.Sleep(500 * time.Millisecond)
+							// 继续循环，下次循环会重新创建上下文
+							continue
 						}
 
 						if attempt == rpcMaxAttempts {
@@ -371,6 +412,7 @@ func main() {
 						// 只在最后一次尝试失败时记录日志，减少日志输出
 						cancel() // 确保取消上下文
 						time.Sleep(rpcRetryDelay)
+						// 继续循环，下次循环会重新创建上下文
 						continue
 					}
 
