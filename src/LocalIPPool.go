@@ -7,6 +7,7 @@ import ( // 导入所需的标准库
 	"math/big"        // 用于大整数运算
 	mrand "math/rand" // 用于伪随机数生成
 	"net"             // 用于网络相关功能
+	"os/exec"         // 用于执行系统命令
 	"strings"         // 用于字符串操作
 	"sync"            // 用于同步原语如互斥锁
 	"time"            // 用于时间处理
@@ -39,6 +40,11 @@ type LocalIPPool struct { // 定义LocalIPPool结构体，实现IPPool接口
 	ipv6Queue chan net.IP // IPv6地址队列
 	// stopChan 用于在关闭IP池时，向后台的生成器goroutine发送停止信号。
 	stopChan chan struct{} // 停止信号通道
+	// ipv6Interface 存储IPv6接口名称，用于绑定IPv6地址
+	ipv6Interface string // IPv6接口名称
+	// createdIPv6Addrs 存储已创建的IPv6地址，用于清理
+	createdIPv6Addrs map[string]bool // 已创建的IPv6地址映射
+	createdIPv6Mutex sync.RWMutex    // 保护已创建地址映射的互斥锁
 }
 
 // NewLocalIPPool 创建并初始化一个智能IP池。
@@ -128,6 +134,15 @@ func NewLocalIPPool(staticIPv4s []string, ipv6SubnetCIDR string) (IPPool, error)
 				pool.hasIPv6Support = true                       // 设置IPv6支持标志
 				pool.ipv6Subnet = subnet                         // 设置IPv6子网
 				pool.ipv6Queue = make(chan net.IP, 100)          // 预生成100个IPv6地址作为缓冲区。
+				pool.createdIPv6Addrs = make(map[string]bool)    // 初始化已创建地址映射
+				// 检测IPv6接口名称
+				pool.ipv6Interface = detectIPv6Interface(subnet)
+				if pool.ipv6Interface == "" {
+					fmt.Println("[IP池] 警告: 未找到IPv6接口，将尝试使用 ipv6net")
+					pool.ipv6Interface = "ipv6net" // 默认接口名称
+				} else {
+					fmt.Printf("[IP池] 检测到IPv6接口: %s\n", pool.ipv6Interface)
+				}
 				go pool.producer()                               // 在后台启动IPv6地址生产者。
 			}
 		} else { // 如果子网未配置
@@ -163,7 +178,14 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 		}
 		// 从队列中获取一个预生成的IPv6地址。
 		// 如果队列为空，此操作会阻塞，直到后台生产者放入新的地址。
-		return <-ipv6Queue // 从IPv6队列获取地址
+		ip := <-ipv6Queue // 从IPv6队列获取地址
+		
+		// 确保IPv6地址在系统上已创建
+		if ip != nil {
+			p.ensureIPv6AddressCreated(ip)
+		}
+		
+		return ip
 	}
 
 	// 在仅IPv4模式下，从静态列表中随机选择一个。
@@ -176,7 +198,7 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 	return p.staticIPv4s[idx]              // 返回随机选择的IPv4地址
 }
 
-// Close 优雅地关闭IP池，停止后台的goroutine。
+// Close 优雅地关闭IP池，停止后台的goroutine，并清理所有创建的IPv6地址。
 // 这是对 io.Closer 接口的实现。
 func (p *LocalIPPool) Close() error { // 实现Close方法
 	p.mu.RLock()                   // 加读锁
@@ -184,6 +206,9 @@ func (p *LocalIPPool) Close() error { // 实现Close方法
 	p.mu.RUnlock()                 // 解读锁
 
 	if hasSupport { // 如果支持IPv6
+		// 清理所有创建的IPv6地址
+		p.cleanupCreatedIPv6Addresses()
+		
 		// 使用非阻塞的方式尝试关闭channel，防止重复关闭导致的panic。
 		select {
 		case <-p.stopChan: // 检查停止通道是否已关闭
@@ -477,4 +502,142 @@ func isSubnetConfigured(targetSubnet *net.IPNet) bool { // 检查子网是否已
 		}
 	}
 	return false // 返回false
+}
+
+// detectIPv6Interface 检测包含指定IPv6子网的接口名称
+func detectIPv6Interface(subnet *net.IPNet) string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range interfaces {
+		// 忽略状态为Down的接口或回环接口
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() == nil {
+				// 检查接口上配置的IP地址是否位于目标子网内
+				if subnet.Contains(ipnet.IP) {
+					return iface.Name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ensureIPv6AddressCreated 确保IPv6地址在系统上已创建
+func (p *LocalIPPool) ensureIPv6AddressCreated(ip net.IP) {
+	if ip == nil {
+		return
+	}
+
+	ipStr := ip.String()
+	
+	// 检查地址是否已创建
+	p.createdIPv6Mutex.RLock()
+	alreadyCreated := p.createdIPv6Addrs[ipStr]
+	p.createdIPv6Mutex.RUnlock()
+
+	if alreadyCreated {
+		return // 地址已创建，跳过
+	}
+
+	// 检查地址是否已在系统上存在
+	if p.isIPv6AddressExists(ipStr) {
+		// 地址已存在，记录但不创建
+		p.createdIPv6Mutex.Lock()
+		p.createdIPv6Addrs[ipStr] = true
+		p.createdIPv6Mutex.Unlock()
+		return
+	}
+
+	// 创建IPv6地址
+	p.mu.RLock()
+	interfaceName := p.ipv6Interface
+	p.mu.RUnlock()
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net" // 默认接口名称
+	}
+
+	// 使用 ip addr add 命令创建地址
+	cmd := exec.Command("ip", "addr", "add", ipStr+"/128", "dev", interfaceName)
+	if err := cmd.Run(); err != nil {
+		// 创建失败，记录错误但不阻塞
+		fmt.Printf("[IP池] 警告: 创建IPv6地址 %s 失败: %v\n", ipStr, err)
+		return
+	}
+
+	// 记录已创建的地址
+	p.createdIPv6Mutex.Lock()
+	p.createdIPv6Addrs[ipStr] = true
+	p.createdIPv6Mutex.Unlock()
+
+	fmt.Printf("[IP池] 已创建IPv6地址: %s/%s\n", ipStr, interfaceName)
+}
+
+// isIPv6AddressExists 检查IPv6地址是否已在系统上存在
+func (p *LocalIPPool) isIPv6AddressExists(ipStr string) bool {
+	p.mu.RLock()
+	interfaceName := p.ipv6Interface
+	p.mu.RUnlock()
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net"
+	}
+
+	// 使用 ip addr show 命令检查地址是否存在
+	cmd := exec.Command("ip", "-6", "addr", "show", "dev", interfaceName)
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	return strings.Contains(string(output), ipStr)
+}
+
+// cleanupCreatedIPv6Addresses 清理所有创建的IPv6地址
+func (p *LocalIPPool) cleanupCreatedIPv6Addresses() {
+	p.createdIPv6Mutex.Lock()
+	defer p.createdIPv6Mutex.Unlock()
+
+	if len(p.createdIPv6Addrs) == 0 {
+		return
+	}
+
+	p.mu.RLock()
+	interfaceName := p.ipv6Interface
+	p.mu.RUnlock()
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net"
+	}
+
+	cleaned := 0
+	for ipStr := range p.createdIPv6Addrs {
+		// 使用 ip addr del 命令删除地址
+		cmd := exec.Command("ip", "addr", "del", ipStr+"/128", "dev", interfaceName)
+		if err := cmd.Run(); err != nil {
+			// 删除失败，记录但不阻塞
+			fmt.Printf("[IP池] 警告: 删除IPv6地址 %s 失败: %v\n", ipStr, err)
+		} else {
+			cleaned++
+		}
+	}
+
+	if cleaned > 0 {
+		fmt.Printf("[IP池] 已清理 %d 个IPv6地址\n", cleaned)
+	}
+
+	// 清空映射
+	p.createdIPv6Addrs = make(map[string]bool)
 }
