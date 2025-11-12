@@ -130,6 +130,9 @@ func main() {
 						} else {
 							log.Printf("[任务 %d] 响应体已保存: %s (%d 字节)", idx, filePath, bodyLen)
 						}
+						
+						// 立即释放响应体内存，避免内存累积
+						resp.Body = nil
 					} else {
 						bodyPreview = ", body_preview=(空)"
 					}

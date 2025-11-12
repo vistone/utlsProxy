@@ -124,12 +124,16 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	statusCode, body, err := s.crawler.handleTaskRequest(ctx, req.ClientID, req.Path)
 	resp.StatusCode = int32(statusCode)
 	
+	// 记录body长度，用于统计和日志
+	bodyLen := len(body)
+	
 	if err != nil {
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 		resp.ErrorMessage = err.Error()
 		// 记录gRPC响应大小（错误消息）
 		responseSize := int64(len(resp.ErrorMessage))
 		atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
+		// body为nil，无需释放
 		return resp, nil
 	}
 
@@ -139,21 +143,26 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 	}
 
+	// 将body赋值给resp.Body
+	// 注意：resp.Body会在gRPC响应发送完成后由gRPC框架自动释放
+	// body是handleTaskRequest返回的副本，原始响应体已在handleTaskRequest中释放
 	resp.Body = body
 	// 记录gRPC响应大小（响应体）
-	responseSize := int64(len(resp.Body))
+	responseSize := int64(bodyLen)
 	if resp.ErrorMessage != "" {
 		responseSize += int64(len(resp.ErrorMessage))
 	}
 	atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
 	
 	// 调试日志：确认响应体已正确设置
-	if len(body) > 0 {
-		log.Printf("[gRPC] 响应已准备: client_id=%s, status=%d, body_len=%d", req.ClientID, statusCode, len(body))
+	if bodyLen > 0 {
+		log.Printf("[gRPC] 响应已准备: client_id=%s, status=%d, body_len=%d", req.ClientID, statusCode, bodyLen)
 	} else {
 		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
 	}
 	
+	// body是局部变量，函数返回后会自动回收
+	// resp.Body会在gRPC响应发送完成后由gRPC框架自动释放
 	return resp, nil
 }
 
@@ -195,15 +204,28 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 
 		// 如果超过2秒，直接返回超时错误，让客户端重试
 		if duration > serverTimeout {
+			// 释放响应体内存
+			if resp != nil {
+				resp.Body = nil
+			}
 			log.Printf("[gRPC] 任务(%s) 第 %d 次超时 [目标IP: %s, 耗时: %v]，返回超时让客户端重试", clientID, attempt, targetIP, duration)
 			return 0, nil, fmt.Errorf("请求超时（耗时 %v，超过 %v），请客户端重试", duration, serverTimeout)
 		}
 
-		if resp.StatusCode == 200 {
-			return resp.StatusCode, resp.Body, nil
+		// 复制body并立即释放原始响应体内存
+		var bodyCopy []byte
+		if resp != nil && resp.Body != nil {
+			bodyCopy = make([]byte, len(resp.Body))
+			copy(bodyCopy, resp.Body)
+			// 立即释放原始body内存，避免内存累积
+			resp.Body = nil
 		}
 
-		return resp.StatusCode, resp.Body, fmt.Errorf("远端返回状态码 %d", resp.StatusCode)
+		if resp.StatusCode == 200 {
+			return resp.StatusCode, bodyCopy, nil
+		}
+
+		return resp.StatusCode, bodyCopy, fmt.Errorf("远端返回状态码 %d", resp.StatusCode)
 	}
 
 	return 0, nil, fmt.Errorf("任务执行失败：超过最大重试次数")
