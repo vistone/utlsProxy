@@ -34,11 +34,20 @@ const (
 	StatusUnhealthy
 )
 
+// connMetadata 连接元数据，包含连接及其相关信息
+type connMetadata struct {
+	conn      *utls.UConn  // UTLS连接
+	targetIP  string       // 目标IP地址
+	localIP   string       // 本地绑定IP地址
+	createdAt time.Time    // 连接创建时间
+	lastUsed  time.Time    // 最后使用时间
+}
+
 // domainConnPool 表示基于域名的连接池实现
 type domainConnPool struct {
-	// 连接池相关字段
-	healthyConns   chan *utls.UConn // 健康连接通道
-	unhealthyConns chan *utls.UConn // 不健康连接通道
+	// 连接池相关字段（使用连接元数据）
+	healthyConns   chan *connMetadata // 健康连接通道
+	unhealthyConns chan *connMetadata // 不健康连接通道
 
 	// 依赖组件
 	domainMonitor   DomainMonitor      // 域名IP监控器
@@ -133,8 +142,8 @@ func NewDomainHotConnPool(config DomainConnPoolConfig) (HotConnPool, error) {
 	hasIPv6Support := config.LocalIPv6Pool != nil
 
 	pool := &domainConnPool{
-		healthyConns:          make(chan *utls.UConn, config.MaxConns),
-		unhealthyConns:        make(chan *utls.UConn, config.MaxConns),
+		healthyConns:          make(chan *connMetadata, config.MaxConns),
+		unhealthyConns:        make(chan *connMetadata, config.MaxConns),
 		domainMonitor:         config.DomainMonitor,
 		ipAccessControl:       config.IPAccessControl,
 		fingerprint:           config.Fingerprint,
@@ -271,9 +280,10 @@ func (p *domainConnPool) getTargetIP(preferIPv6 bool) (string, bool) {
 }
 
 // createConnection 创建单个UTLS连接
-func (p *domainConnPool) createConnection(localIP, targetIP string) (*utls.UConn, error) {
-	// 验证目标IP是否在白名单
-	if !p.ipAccessControl.IsIPAllowed(targetIP) {
+// skipWhitelistCheck: 如果为true，跳过白名单检查（用于预热阶段）
+func (p *domainConnPool) createConnection(localIP, targetIP string, skipWhitelistCheck bool) (*utls.UConn, error) {
+	// 验证目标IP是否在白名单（预热阶段可以跳过）
+	if !skipWhitelistCheck && !p.ipAccessControl.IsIPAllowed(targetIP) {
 		return nil, fmt.Errorf("目标IP %s 不在白名单中", targetIP)
 	}
 
@@ -324,7 +334,8 @@ func (p *domainConnPool) createConnection(localIP, targetIP string) (*utls.UConn
 }
 
 // createConnectionWithFallback 创建连接（带降级策略）
-func (p *domainConnPool) createConnectionWithFallback() (*utls.UConn, string, string, error) {
+// skipWhitelistCheck: 如果为true，跳过白名单检查（用于预热阶段）
+func (p *domainConnPool) createConnectionWithFallback(skipWhitelistCheck bool) (*utls.UConn, string, string, error) {
 	// 获取本地IP（IPv6优先）
 	localIP, localIsIPv6 := p.getLocalIP()
 	if localIP == "" {
@@ -335,7 +346,7 @@ func (p *domainConnPool) createConnectionWithFallback() (*utls.UConn, string, st
 	if localIsIPv6 {
 		targetIP, targetIsIPv6 := p.getTargetIP(true) // 优先IPv6
 		if targetIP != "" && targetIsIPv6 {
-			conn, err := p.createConnection(localIP, targetIP)
+			conn, err := p.createConnection(localIP, targetIP, skipWhitelistCheck)
 			if err == nil {
 				return conn, localIP, targetIP, nil
 			}
@@ -346,7 +357,7 @@ func (p *domainConnPool) createConnectionWithFallback() (*utls.UConn, string, st
 		targetIP, _ = p.getTargetIP(false) // 降级到IPv4
 		if targetIP != "" {
 			// 注意：IPv6本地IP无法直接连接IPv4目标IP，使用系统默认路由
-			conn, err := p.createConnection("", targetIP) // 不绑定本地IP
+			conn, err := p.createConnection("", targetIP, skipWhitelistCheck) // 不绑定本地IP
 			if err == nil {
 				return conn, "", targetIP, nil
 			}
@@ -357,7 +368,7 @@ func (p *domainConnPool) createConnectionWithFallback() (*utls.UConn, string, st
 	if !localIsIPv6 {
 		targetIP, _ := p.getTargetIP(false) // 使用IPv4
 		if targetIP != "" {
-			conn, err := p.createConnection(localIP, targetIP)
+			conn, err := p.createConnection(localIP, targetIP, skipWhitelistCheck)
 			if err == nil {
 				return conn, localIP, targetIP, nil
 			}
@@ -445,40 +456,84 @@ func (p *domainConnPool) healthCheckWithConn(conn *utls.UConn, targetIP string) 
 func (p *domainConnPool) GetConn() (*utls.UConn, error) {
 	// 优先从健康连接池获取
 	select {
-	case conn := <-p.healthyConns:
-		return conn, nil
+	case connMeta := <-p.healthyConns:
+		// 更新最后使用时间
+		connMeta.lastUsed = time.Now()
+		return connMeta.conn, nil
 	default:
 		// 健康池为空，继续尝试不健康池
 	}
 
 	// 尝试从不健康连接池获取
 	select {
-	case conn := <-p.unhealthyConns:
-		return conn, nil
+	case connMeta := <-p.unhealthyConns:
+		// 更新最后使用时间
+		connMeta.lastUsed = time.Now()
+		return connMeta.conn, nil
 	default:
 		// 两个池都为空，创建新连接
 	}
 
-	// 创建新连接
-	conn, _, _, err := p.createConnectionWithFallback()
+	// 创建新连接（正常使用时需要检查白名单）
+	conn, localIP, targetIP, err := p.createConnectionWithFallback(false)
 	if err != nil {
 		return nil, fmt.Errorf("创建连接失败: %w", err)
+	}
+
+	// 创建连接元数据（虽然不会放入池中，但保持一致性）
+	_ = &connMetadata{
+		conn:      conn,
+		targetIP:  targetIP,
+		localIP:   localIP,
+		createdAt: time.Now(),
+		lastUsed:  time.Now(),
 	}
 
 	return conn, nil
 }
 
 // ReturnConn 将连接返回到连接池
+// 注意：此方法需要知道连接的目标IP，但当前接口只接收conn和statusCode
+// 为了兼容性，我们尝试从连接获取远程地址，如果失败则无法更新黑白名单
 func (p *domainConnPool) ReturnConn(conn *utls.UConn, statusCode int) error {
 	if conn == nil {
 		return fmt.Errorf("连接不能为空")
 	}
 
+	// 尝试从连接获取目标IP（用于更新黑白名单）
+	// utls.UConn实现了net.Conn接口，可以直接使用RemoteAddr()
+	var targetIP string
+	if remoteAddr := conn.RemoteAddr(); remoteAddr != nil {
+		if tcpAddr, ok := remoteAddr.(*net.TCPAddr); ok {
+			targetIP = tcpAddr.IP.String()
+		}
+	}
+
+	// 尝试从连接获取本地IP
+	var localIP string
+	if localAddr := conn.LocalAddr(); localAddr != nil {
+		if tcpAddr, ok := localAddr.(*net.TCPAddr); ok {
+			localIP = tcpAddr.IP.String()
+		}
+	}
+
+	// 创建连接元数据
+	connMeta := &connMetadata{
+		conn:      conn,
+		targetIP:  targetIP,
+		localIP:   localIP,
+		createdAt: time.Now(), // 如果是从池中取出的连接，这个时间可能不准确，但不影响使用
+		lastUsed:  time.Now(),
+	}
+
 	// 根据状态码判断连接健康状态
 	if statusCode == 200 {
-		// 健康连接，放入健康池
+		// 健康连接，加入白名单并放入健康池
+		if targetIP != "" {
+			p.ipAccessControl.AddIP(targetIP, true) // 加入白名单
+		}
 		select {
-		case p.healthyConns <- conn:
+		case p.healthyConns <- connMeta:
 			return nil
 		default:
 			// 健康池已满，关闭连接
@@ -487,19 +542,16 @@ func (p *domainConnPool) ReturnConn(conn *utls.UConn, statusCode int) error {
 		}
 	} else if statusCode == 403 {
 		// 403错误，IP被封，加入黑名单
-		// 注意：这里无法直接获取目标IP，需要通过其他方式记录
-		// 暂时放入不健康池
-		select {
-		case p.unhealthyConns <- conn:
-			return nil
-		default:
-			conn.Close()
-			return nil
+		if targetIP != "" {
+			p.ipAccessControl.AddIP(targetIP, false) // 加入黑名单
 		}
+		// 被封的连接直接关闭，不放入池中
+		conn.Close()
+		return nil
 	} else {
 		// 其他错误，放入不健康池
 		select {
-		case p.unhealthyConns <- conn:
+		case p.unhealthyConns <- connMeta:
 			return nil
 		default:
 			conn.Close()
@@ -509,17 +561,21 @@ func (p *domainConnPool) ReturnConn(conn *utls.UConn, statusCode int) error {
 }
 
 // Warmup 预热连接池
+// 预热阶段应该测试所有IP，而不是只测试白名单中的IP
+// 因为系统启动时白名单是空的，需要通过预热来填充
 func (p *domainConnPool) Warmup() error {
 	fmt.Printf("[连接池] 开始预热，并发数: %d\n", p.warmupConcurrency)
 
 	// 刷新IP列表
 	p.refreshTargetIPList()
 
-	// 获取所有可用的目标IP（IPv6优先）
+	// 获取所有目标IP（预热时不进行白名单过滤，测试所有IP）
 	p.ipListMutex.RLock()
-	allIPv6 := p.filterAllowedIPs(p.targetIPv6List)
-	allIPv4 := p.filterAllowedIPs(p.targetIPv4List)
+	allIPv6 := p.targetIPv6List // 直接使用所有IPv6，不进行白名单过滤
+	allIPv4 := p.targetIPv4List // 直接使用所有IPv4，不进行白名单过滤
 	p.ipListMutex.RUnlock()
+
+	fmt.Printf("[连接池] 预热IP数量：IPv6=%d个, IPv4=%d个\n", len(allIPv6), len(allIPv4))
 
 	// 创建信号量控制并发
 	semaphore := make(chan struct{}, p.warmupConcurrency)
@@ -553,6 +609,7 @@ func (p *domainConnPool) Warmup() error {
 }
 
 // warmupSingleIP 预热单个IP
+// 预热时跳过白名单检查，允许测试所有IP
 func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 	// 获取本地IP（优先使用IPv6）
 	localIP, _ := p.getLocalIP()
@@ -566,8 +623,8 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 		}
 	}
 
-	// 创建连接
-	conn, err := p.createConnection(localIP, targetIP)
+	// 创建连接（预热时跳过白名单检查）
+	conn, err := p.createConnection(localIP, targetIP, true) // skipWhitelistCheck = true
 	if err != nil {
 		fmt.Printf("[预热] 连接创建失败 [%s]: %v\n", targetIP, err)
 		return
@@ -582,13 +639,23 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 		return
 	}
 
+	// 创建连接元数据
+	now := time.Now()
+	connMeta := &connMetadata{
+		conn:      conn,
+		targetIP:  targetIP,
+		localIP:   localIP,
+		createdAt: now,
+		lastUsed:  now,
+	}
+
 	// 根据状态码更新黑白名单并将连接放入池中
 	switch statusCode {
 	case 200:
 		// 健康连接，加入白名单并放入健康连接池
 		p.ipAccessControl.AddIP(targetIP, true) // 加入白名单
 		select {
-		case p.healthyConns <- conn:
+		case p.healthyConns <- connMeta:
 			// 成功放入健康连接池，连接被保留用于复用
 			fmt.Printf("[预热] 成功 [%s]: 200 -> 白名单，连接已放入健康池\n", targetIP)
 		default:
@@ -604,7 +671,7 @@ func (p *domainConnPool) warmupSingleIP(targetIP string, isIPv6 bool) {
 	default:
 		// 其他错误状态码，放入不健康连接池
 		select {
-		case p.unhealthyConns <- conn:
+		case p.unhealthyConns <- connMeta:
 			// 成功放入不健康连接池，连接被保留用于复用
 			fmt.Printf("[预热] 警告 [%s]: 状态码 %d -> 不健康池\n", targetIP, statusCode)
 		default:
@@ -707,9 +774,60 @@ func (p *domainConnPool) testBlacklistedIPs() {
 
 // cleanupIdleConns 清理空闲连接
 func (p *domainConnPool) cleanupIdleConns() {
-	// 这里可以实现连接超时清理逻辑
-	// 由于连接没有时间戳，暂时不实现
-	// 可以通过定期检查连接状态来实现
+	now := time.Now()
+	cleanedCount := 0
+
+	// 清理健康连接池中的空闲连接
+	for {
+		select {
+		case connMeta := <-p.healthyConns:
+			// 检查连接是否超时
+			if now.Sub(connMeta.lastUsed) > p.idleTime {
+				// 连接空闲时间超过阈值，关闭连接
+				connMeta.conn.Close()
+				cleanedCount++
+			} else {
+				// 连接仍然有效，放回池中
+				select {
+				case p.healthyConns <- connMeta:
+				default:
+					// 池已满，关闭连接
+					connMeta.conn.Close()
+				}
+			}
+		default:
+			goto unhealthy
+		}
+	}
+
+unhealthy:
+	// 清理不健康连接池中的空闲连接
+	for {
+		select {
+		case connMeta := <-p.unhealthyConns:
+			// 检查连接是否超时
+			if now.Sub(connMeta.lastUsed) > p.idleTime {
+				// 连接空闲时间超过阈值，关闭连接
+				connMeta.conn.Close()
+				cleanedCount++
+			} else {
+				// 连接仍然有效，放回池中
+				select {
+				case p.unhealthyConns <- connMeta:
+				default:
+					// 池已满，关闭连接
+					connMeta.conn.Close()
+				}
+			}
+		default:
+			goto done
+		}
+	}
+
+done:
+	if cleanedCount > 0 {
+		fmt.Printf("[连接池] 清理了 %d 个空闲连接\n", cleanedCount)
+	}
 }
 
 // Close 关闭连接池并释放所有资源
@@ -723,8 +841,8 @@ func (p *domainConnPool) Close() error {
 	// 关闭健康连接池中的连接
 	for {
 		select {
-		case conn := <-p.healthyConns:
-			conn.Close()
+		case connMeta := <-p.healthyConns:
+			connMeta.conn.Close()
 		default:
 			goto unhealthy
 		}
@@ -734,8 +852,8 @@ unhealthy:
 	// 关闭不健康连接池中的连接
 	for {
 		select {
-		case conn := <-p.unhealthyConns:
-			conn.Close()
+		case connMeta := <-p.unhealthyConns:
+			connMeta.conn.Close()
 		default:
 			goto cleanup
 		}
