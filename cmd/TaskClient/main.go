@@ -29,7 +29,7 @@ func main() {
 		rpcMaxAttempts  = 5
 		rpcRetryDelay   = 50 * time.Millisecond
 		outputDir       = "/Volumes/SSD/taskclient_data" // 响应体保存目录
-		useKCP          = false                          // 是否使用KCP传输（需要与服务器端配置一致）
+		useKCP          = true                           // 是否使用KCP传输（需要与服务器端配置一致）
 	)
 
 	if repeatCount <= 0 {
