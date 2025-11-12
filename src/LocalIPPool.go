@@ -255,15 +255,45 @@ func (p *LocalIPPool) Close() error { // 实现Close方法
 
 // producer 是一个后台运行的goroutine，它持续不断地生成新的随机IPv6地址，
 // 并将它们放入ipv6Queue通道，直到收到停止信号。
+// 为了避免队列积压过多地址，当队列已满或活跃地址足够时暂停生成。
 func (p *LocalIPPool) producer() { // IPv6地址生产者方法
 	for { // 无限循环
 		select {
 		case <-p.stopChan: // 如果收到停止信号
 			return // 收到停止信号，优雅退出。
 		default: // 默认情况
-			// 此处为非阻塞写入，但由于select的特性，它会持续尝试。
-			// 实际上，当队列满时，它会生成IP然后在此处阻塞，直到队列有空间。
-			p.ipv6Queue <- p.generateRandomIPInSubnet() // 生成随机IPv6地址并放入队列
+			// 检查队列是否已满
+			if len(p.ipv6Queue) >= cap(p.ipv6Queue) {
+				// 队列已满，等待一段时间再检查
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			
+			// 检查活跃地址数量，如果已经足够，减少生成频率
+			p.activeIPv6Mutex.RLock()
+			activeCount := len(p.activeIPv6Addrs)
+			p.activeIPv6Mutex.RUnlock()
+			
+			p.mu.RLock()
+			minActive := p.minActiveAddrs
+			p.mu.RUnlock()
+			
+			// 如果活跃地址已经达到或超过目标值，降低生成频率
+			if minActive > 0 && activeCount >= minActive {
+				// 队列未满但活跃地址已足够，降低生成频率
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			
+			// 生成随机IPv6地址并放入队列
+			ip := p.generateRandomIPInSubnet()
+			if ip != nil {
+				select {
+				case p.ipv6Queue <- ip: // 尝试将地址放入队列
+				case <-p.stopChan: // 如果放入过程中收到停止信号
+					return // 收到停止信号，优雅退出。
+				}
+			}
 		}
 	}
 }
@@ -861,12 +891,16 @@ func (p *LocalIPPool) adjustIPv6AddressPool() {
 
 	// 只负责创建地址，不在这里删除（删除由cleanupUnusedIPv6Addresses负责）
 	// 如果活跃地址太少，批量创建新地址
+	// 但是要避免频繁创建：如果活跃地址已经接近目标值，就不要继续创建
 	if activeCount < minActive {
 		needed := minActive - activeCount
-		if needed > batchSize {
-			needed = batchSize
+		// 如果差距很小（小于batchSize），说明已经在接近目标值，不需要批量创建
+		// 让GetIP()自然创建即可
+		if needed >= batchSize {
+			p.batchCreateIPv6Addresses(batchSize, subnet, interfaceName)
 		}
-		p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
+		// 如果差距小于batchSize，说明已经接近目标值，不需要批量创建
+		// 这样可以避免频繁创建，让GetIP()按需创建即可
 	}
 }
 
