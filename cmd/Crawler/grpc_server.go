@@ -153,9 +153,8 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 	}
 
-	// 大响应体阈值：超过500KB的响应体直接写入文件，避免占用内存
-	// 降低阈值以更早释放内存，控制在500MB左右
-	const largeBodyThreshold = 500 * 1024 // 500KB
+	// 所有响应体都写入文件，彻底避免内存占用
+	// 这样可以避免gRPC框架复制数据到发送缓冲区时的内存占用
 	const maxResponseBodySize = 50 * 1024 * 1024 // 50MB
 	
 	if bodyLen > maxResponseBodySize {
@@ -164,35 +163,29 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		bodyLen = maxResponseBodySize
 	}
 	
-	// 如果响应体较大，直接写入临时文件，避免占用内存
-	if bodyLen > largeBodyThreshold {
-		tempFile := filepath.Join(s.crawler.tempFileDir, fmt.Sprintf("resp_%s_%d_%d.tmp", req.ClientID, time.Now().UnixNano(), bodyLen))
-		if err := os.WriteFile(tempFile, body, 0644); err != nil {
-			log.Printf("[gRPC] 警告: 写入临时文件失败: %v，将使用内存传输", err)
-			// 写入失败，回退到内存传输
-			resp.Body = body
-		} else {
-			// 写入成功，设置文件路径，清空body
-			resp.FilePath = tempFile
-			resp.Body = nil // 清空body，释放内存
-			body = nil
-			// bodyLen保持原值用于统计
-			
-			// 使用goroutine在响应发送后快速清理临时文件
-			// 客户端会在复制完成后立即删除，这里作为备用清理机制
-			go func(filePath string) {
-				time.Sleep(2 * time.Minute) // 等待2分钟后清理临时文件（备用机制）
-				if err := os.Remove(filePath); err != nil {
-					// 文件可能已被客户端删除，忽略错误
-					if !os.IsNotExist(err) {
-						log.Printf("[gRPC] 警告: 清理临时文件失败: %v", err)
-					}
-				}
-			}(tempFile)
-		}
-	} else {
-		// 小响应体直接使用内存传输
+	// 所有响应体都写入临时文件，避免占用内存
+	tempFile := filepath.Join(s.crawler.tempFileDir, fmt.Sprintf("resp_%s_%d_%d.tmp", req.ClientID, time.Now().UnixNano(), bodyLen))
+	if err := os.WriteFile(tempFile, body, 0644); err != nil {
+		log.Printf("[gRPC] 警告: 写入临时文件失败: %v，将使用内存传输", err)
+		// 写入失败，回退到内存传输（这种情况应该很少）
 		resp.Body = body
+	} else {
+		// 写入成功，设置文件路径，立即清空body释放内存
+		resp.FilePath = tempFile
+		resp.Body = nil // 立即清空body，释放内存
+		body = nil      // 立即清空局部变量body
+		
+		// 使用goroutine在响应发送后快速清理临时文件
+		// 客户端会在复制完成后立即删除，这里作为备用清理机制
+		go func(filePath string) {
+			time.Sleep(2 * time.Minute) // 等待2分钟后清理临时文件（备用机制）
+			if err := os.Remove(filePath); err != nil {
+				// 文件可能已被客户端删除，忽略错误
+				if !os.IsNotExist(err) {
+					log.Printf("[gRPC] 警告: 清理临时文件失败: %v", err)
+				}
+			}
+		}(tempFile)
 	}
 	// 记录gRPC响应大小（响应体）
 	// 如果使用文件路径，bodyLen仍然是原始大小，用于统计
@@ -207,10 +200,10 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
 	}
 	
-	// 对于小响应体（内存传输），立即清理，不需要延迟
-	// 对于大响应体（文件传输），body已经是nil，resp.Body也是nil，无需清理
-	if bodyLen <= largeBodyThreshold {
-		// 小响应体使用内存传输，需要延迟清理确保gRPC发送完成
+	// 所有响应体都已写入文件，body和resp.Body都是nil，无需清理
+	// 但为了保险起见，如果写入失败回退到内存传输，仍然需要延迟清理
+	if resp.Body != nil {
+		// 写入文件失败，回退到内存传输的情况，需要延迟清理
 		go func(r *taskapi.TaskResponse, b []byte) {
 			// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，100ms足够）
 			time.Sleep(100 * time.Millisecond)
@@ -223,16 +216,8 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 				b = nil
 			}
 		}(resp, body)
-	} else {
-		// 大响应体已经写入文件，body和resp.Body都是nil，无需清理
-		// 但为了保险起见，仍然清理resp引用
-		go func(r *taskapi.TaskResponse) {
-			time.Sleep(50 * time.Millisecond)
-			if r != nil {
-				r.Body = nil
-			}
-		}(resp)
 	}
+	// 如果resp.Body已经是nil（文件传输成功），body也是nil，无需清理
 	
 	// body是局部变量，函数返回后会自动回收
 	// resp.Body和body都会在goroutine中延迟清理，避免内存累积
@@ -298,26 +283,25 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 			return 0, nil, fmt.Errorf("请求超时（耗时 %v，超过 %v），请客户端重试", duration, serverTimeout)
 		}
 
-		// 复制body并立即释放原始响应体内存
-		var bodyCopy []byte
+		// 直接返回body引用，避免不必要的复制
+		// 注意：调用者会立即将body写入文件，所以这里不需要复制
 		statusCode := 0
+		var body []byte
 		if resp != nil {
 			statusCode = resp.StatusCode
-			if resp.Body != nil {
-				bodyCopy = make([]byte, len(resp.Body))
-				copy(bodyCopy, resp.Body)
-				// 立即释放原始body内存，避免内存累积
-				resp.Body = nil
-			}
-			// 清空resp对象引用，帮助GC回收
+			// 先保存body引用
+			body = resp.Body
+			// 然后立即释放resp对象引用，帮助GC回收
+			// body引用已保存，可以安全清空resp.Body
+			resp.Body = nil
 			resp = nil
 		}
 
 		if statusCode == 200 {
-			return statusCode, bodyCopy, nil
+			return statusCode, body, nil
 		}
 
-		return statusCode, bodyCopy, fmt.Errorf("远端返回状态码 %d", statusCode)
+		return statusCode, body, fmt.Errorf("远端返回状态码 %d", statusCode)
 	}
 
 	return 0, nil, fmt.Errorf("任务执行失败：超过最大重试次数")
