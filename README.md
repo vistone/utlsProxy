@@ -379,8 +379,39 @@ go test ./test/... -run TestLocalIPPool -v
 
 欢迎提交 Issue 和 Pull Request！
 
+## 版本管理
+
+项目使用自动版本管理系统，每次提交到 `main` 分支时会自动增加小版本号并创建GitHub Release。
+
+### 自动发布
+
+推送到 `main` 分支时，GitHub Actions会自动：
+1. 检测当前版本号
+2. 增加小版本号（patch: v1.0.0 → v1.0.1）
+3. 更新VERSION文件和config.toml
+4. 创建Git标签
+5. 创建GitHub Release
+
+**跳过自动发布**：在提交信息中添加 `[skip release]`
+
+### 手动发布
+
+```bash
+# 一键提交并发布
+./scripts/commit_and_release.sh "你的提交信息"
+
+# 或分步执行
+./scripts/bump_version.sh patch    # 增加版本号
+git add VERSION config/config.toml
+git commit -m "Bump version"
+git push origin main
+```
+
+详细说明请查看 [版本管理文档](docs/版本管理.md)
+
 ## 相关链接
 
 - [详细文档目录](docs/)
 - [配置说明](docs/Config.md)
+- [版本管理说明](docs/版本管理.md)
 - [API文档](docs/)
