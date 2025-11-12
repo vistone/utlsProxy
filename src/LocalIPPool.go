@@ -205,7 +205,33 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 		if ipv6Queue == nil {
 			return nil // 隧道模式：不绑定本地IP，让系统自动选择路由
 		}
-		// 从队列中获取一个预生成的IPv6地址。
+		
+		// 优先从已创建的地址池中复用未使用的地址
+		p.activeIPv6Mutex.RLock()
+		p.usedIPv6Mutex.RLock()
+		
+		// 找出未使用的活跃地址
+		for addrStr := range p.activeIPv6Addrs {
+			if !p.usedIPv6Addrs[addrStr] {
+				ip := net.ParseIP(addrStr)
+				if ip != nil {
+					p.usedIPv6Mutex.RUnlock()
+					p.activeIPv6Mutex.RUnlock()
+					
+					// 标记地址为正在使用
+					p.usedIPv6Mutex.Lock()
+					p.usedIPv6Addrs[addrStr] = true
+					p.usedIPv6Mutex.Unlock()
+					
+					return ip
+				}
+			}
+		}
+		
+		p.usedIPv6Mutex.RUnlock()
+		p.activeIPv6Mutex.RUnlock()
+		
+		// 如果没有可复用的地址，从队列中获取一个新地址
 		// 如果队列为空，此操作会阻塞，直到后台生产者放入新的地址。
 		ip := <-ipv6Queue // 从IPv6队列获取地址
 		
