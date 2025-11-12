@@ -127,6 +127,14 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	// 记录body长度，用于统计和日志
 	bodyLen := len(body)
 	
+	// 使用defer确保body在函数返回前被清理（如果出错）
+	defer func() {
+		// 清理局部变量body，帮助GC回收
+		if body != nil && err != nil {
+			body = nil
+		}
+	}()
+	
 	if err != nil {
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 		resp.ErrorMessage = err.Error()
@@ -170,18 +178,22 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	// 使用goroutine在响应发送后清理内存
 	// 注意：gRPC响应发送是异步的，我们在延迟后清理可以确保响应已发送
 	// 使用goroutine异步清理，避免阻塞响应返回
-	go func(r *taskapi.TaskResponse) {
+	go func(r *taskapi.TaskResponse, b []byte) {
 		// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，200ms足够）
 		time.Sleep(200 * time.Millisecond)
-		// 清理resp.Body，帮助GC回收内存
+		// 清理resp.Body和局部变量body，帮助GC回收内存
 		// 此时gRPC框架应该已经将响应数据复制到发送缓冲区，可以安全清理
 		if r != nil {
 			r.Body = nil
 		}
-	}(resp)
+		// 清理局部变量body引用
+		if b != nil {
+			b = nil
+		}
+	}(resp, body)
 	
 	// body是局部变量，函数返回后会自动回收
-	// resp.Body会在goroutine中延迟清理，避免内存累积
+	// resp.Body和body都会在goroutine中延迟清理，避免内存累积
 	return resp, nil
 }
 
@@ -216,16 +228,23 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 
 		// 使用2秒超时，快速失败让客户端重试
 		resp, _, err, duration := c.performRequestAttempt(0, 0, attempt, targetIP, pathSuffix, workID, serverTimeout)
+		
 		if err != nil {
+			// 立即清理resp对象
+			if resp != nil {
+				resp.Body = nil
+				resp = nil
+			}
 			log.Printf("[gRPC] 任务(%s) 第 %d 次请求失败 [目标IP: %s, 耗时: %v]: %v", clientID, attempt, targetIP, duration, err)
 			continue
 		}
 
 		// 如果超过2秒，直接返回超时错误，让客户端重试
 		if duration > serverTimeout {
-			// 释放响应体内存
+			// 立即释放响应体内存
 			if resp != nil {
 				resp.Body = nil
+				resp = nil // 清空resp对象引用，帮助GC回收
 			}
 			log.Printf("[gRPC] 任务(%s) 第 %d 次超时 [目标IP: %s, 耗时: %v]，返回超时让客户端重试", clientID, attempt, targetIP, duration)
 			return 0, nil, fmt.Errorf("请求超时（耗时 %v，超过 %v），请客户端重试", duration, serverTimeout)
@@ -233,18 +252,24 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 
 		// 复制body并立即释放原始响应体内存
 		var bodyCopy []byte
-		if resp != nil && resp.Body != nil {
-			bodyCopy = make([]byte, len(resp.Body))
-			copy(bodyCopy, resp.Body)
-			// 立即释放原始body内存，避免内存累积
-			resp.Body = nil
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+			if resp.Body != nil {
+				bodyCopy = make([]byte, len(resp.Body))
+				copy(bodyCopy, resp.Body)
+				// 立即释放原始body内存，避免内存累积
+				resp.Body = nil
+			}
+			// 清空resp对象引用，帮助GC回收
+			resp = nil
 		}
 
-		if resp.StatusCode == 200 {
-			return resp.StatusCode, bodyCopy, nil
+		if statusCode == 200 {
+			return statusCode, bodyCopy, nil
 		}
 
-		return resp.StatusCode, bodyCopy, fmt.Errorf("远端返回状态码 %d", resp.StatusCode)
+		return statusCode, bodyCopy, fmt.Errorf("远端返回状态码 %d", statusCode)
 	}
 
 	return 0, nil, fmt.Errorf("任务执行失败：超过最大重试次数")
