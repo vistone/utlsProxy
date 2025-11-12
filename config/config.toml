@@ -20,7 +20,7 @@ HTTPIdleConnTimeoutSeconds=90 # HTTP空闲连接超时时间（秒）
 
 [PoolConfig]
 ProxyAddress = "" # 你的代理地址
-Concurrency = 50
+Concurrency = 500 # gRPC服务器最大并发数，与客户端同步
 RehabilitationIntervalMinutes = 20
 IdleTimeoutMinutes = 10 # 连接空闲10分钟后自动下线
 
@@ -51,7 +51,7 @@ IdleTimeoutMinutes = 5 # 连接空闲超时时间（分钟）
 # 预热配置
 # WarmupPath 和 WarmupHeaders 自动使用 RockTreeDataConfig 中的配置
 WarmupMethod = "GET" # 预热请求方法
-WarmupConcurrency = 100 # 预热并发数
+WarmupConcurrency = 500 # 预热并发数，与客户端同步
 
 # 定时任务配置
 BlacklistTestIntervalMinutes = 5 # 黑名单IP测试间隔（分钟）

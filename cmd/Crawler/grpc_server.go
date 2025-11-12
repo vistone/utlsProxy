@@ -66,6 +66,48 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		}, nil
 	}
 
+	// 并发控制：获取信号量，限制同时处理的请求数
+	// 先尝试立即获取，如果失败则等待最多100ms
+	acquired := false
+	select {
+	case s.crawler.grpcSemaphore <- struct{}{}:
+		acquired = true
+	default:
+		// 信号量已满，等待一小段时间（最多100ms）
+		waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		select {
+		case s.crawler.grpcSemaphore <- struct{}{}:
+			acquired = true
+		case <-waitCtx.Done():
+			// 等待超时，返回错误让客户端重试
+			atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
+			return &taskapi.TaskResponse{
+				ClientID:     req.ClientID,
+				ErrorMessage: "服务器繁忙，请稍后重试（并发限制）",
+			}, nil
+		case <-ctx.Done():
+			// 上下文已取消，直接返回
+			atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
+			return &taskapi.TaskResponse{
+				ClientID:     req.ClientID,
+				ErrorMessage: "请求被取消（并发限制）",
+			}, ctx.Err()
+		}
+	}
+	
+	if !acquired {
+		// 理论上不应该到达这里，但为了安全起见
+		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
+		return &taskapi.TaskResponse{
+			ClientID:     req.ClientID,
+			ErrorMessage: "无法获取并发资源",
+		}, nil
+	}
+	
+	// 成功获取信号量，处理完成后释放
+	defer func() { <-s.crawler.grpcSemaphore }()
+
 	resp := &taskapi.TaskResponse{
 		ClientID: req.ClientID,
 	}

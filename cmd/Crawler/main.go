@@ -31,6 +31,7 @@ type Crawler struct {
 	stopChan        chan struct{}
 	wg              sync.WaitGroup
 	concurrency     int
+	grpcSemaphore   chan struct{} // gRPC请求并发控制信号量
 	dataDir         string
 	stopped         int32
 	fingerprint     src.Profile
@@ -164,6 +165,12 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 	client.ReadTimeout = cfg.UTlsClient.GetReadTimeout()
 	client.HotConnPool = pool
 
+	// 初始化gRPC并发控制信号量，限制最大并发数为配置的并发数
+	grpcConcurrency := cfg.PoolConfig.Concurrency
+	if grpcConcurrency <= 0 {
+		grpcConcurrency = 500 // 默认500并发
+	}
+	
 	crawler := &Crawler{
 		pool:            pool,
 		client:          client,
@@ -175,12 +182,15 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 		},
 		stopChan:       make(chan struct{}),
 		concurrency:    cfg.PoolConfig.Concurrency,
+		grpcSemaphore:  make(chan struct{}, grpcConcurrency), // 创建信号量，限制gRPC并发数
 		dataDir:        dataDir,
 		stopped:        0,
 		fingerprint:    fingerprint,
 		slowIPTracker:  NewSlowIPTracker(4 * time.Second),
 		requestHeaders: requestHeaders,
 	}
+	
+	log.Printf("[并发控制] gRPC服务器最大并发数设置为: %d", grpcConcurrency)
 
 	return crawler, nil
 }
