@@ -153,8 +153,9 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 	}
 
-	// 大响应体阈值：超过1MB的响应体直接写入文件，避免占用内存
-	const largeBodyThreshold = 1 * 1024 * 1024 // 1MB
+	// 大响应体阈值：超过500KB的响应体直接写入文件，避免占用内存
+	// 降低阈值以更早释放内存，控制在500MB左右
+	const largeBodyThreshold = 500 * 1024 // 500KB
 	const maxResponseBodySize = 50 * 1024 * 1024 // 50MB
 	
 	if bodyLen > maxResponseBodySize {
@@ -177,11 +178,15 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 			body = nil
 			// bodyLen保持原值用于统计
 			
-			// 使用goroutine在响应发送后清理临时文件
+			// 使用goroutine在响应发送后快速清理临时文件
+			// 客户端会在复制完成后立即删除，这里作为备用清理机制
 			go func(filePath string) {
-				time.Sleep(5 * time.Minute) // 等待5分钟后清理临时文件
+				time.Sleep(2 * time.Minute) // 等待2分钟后清理临时文件（备用机制）
 				if err := os.Remove(filePath); err != nil {
-					log.Printf("[gRPC] 警告: 清理临时文件失败: %v", err)
+					// 文件可能已被客户端删除，忽略错误
+					if !os.IsNotExist(err) {
+						log.Printf("[gRPC] 警告: 清理临时文件失败: %v", err)
+					}
 				}
 			}(tempFile)
 		}
@@ -202,22 +207,32 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
 	}
 	
-	// 使用goroutine在响应发送后清理内存
-	// 注意：gRPC响应发送是异步的，我们在延迟后清理可以确保响应已发送
-	// 使用goroutine异步清理，避免阻塞响应返回
-	go func(r *taskapi.TaskResponse, b []byte) {
-		// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，200ms足够）
-		time.Sleep(200 * time.Millisecond)
-		// 清理resp.Body和局部变量body，帮助GC回收内存
-		// 此时gRPC框架应该已经将响应数据复制到发送缓冲区，可以安全清理
-		if r != nil {
-			r.Body = nil
-		}
-		// 清理局部变量body引用
-		if b != nil {
-			b = nil
-		}
-	}(resp, body)
+	// 对于小响应体（内存传输），立即清理，不需要延迟
+	// 对于大响应体（文件传输），body已经是nil，resp.Body也是nil，无需清理
+	if bodyLen <= largeBodyThreshold {
+		// 小响应体使用内存传输，需要延迟清理确保gRPC发送完成
+		go func(r *taskapi.TaskResponse, b []byte) {
+			// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，100ms足够）
+			time.Sleep(100 * time.Millisecond)
+			// 清理resp.Body和局部变量body，帮助GC回收内存
+			if r != nil {
+				r.Body = nil
+			}
+			// 清理局部变量body引用
+			if b != nil {
+				b = nil
+			}
+		}(resp, body)
+	} else {
+		// 大响应体已经写入文件，body和resp.Body都是nil，无需清理
+		// 但为了保险起见，仍然清理resp引用
+		go func(r *taskapi.TaskResponse) {
+			time.Sleep(50 * time.Millisecond)
+			if r != nil {
+				r.Body = nil
+			}
+		}(resp)
+	}
 	
 	// body是局部变量，函数返回后会自动回收
 	// resp.Body和body都会在goroutine中延迟清理，避免内存累积

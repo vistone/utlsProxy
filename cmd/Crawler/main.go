@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,6 +295,14 @@ func (c *Crawler) Start() error {
 		return err
 	}
 
+	// 启动定期清理临时文件的goroutine
+	c.wg.Add(1)
+	go c.cleanupTempFiles()
+	
+	// 启动内存监控goroutine
+	c.wg.Add(1)
+	go c.monitorMemory()
+
 	log.Println("爬虫系统已启动并等待任务")
 	return nil
 }
@@ -489,6 +498,127 @@ func (c *Crawler) saveData(filename string, data []byte) error {
 	return os.WriteFile(filePath, data, 0644)
 }
 
+// monitorMemory 定期监控内存使用情况
+func (c *Crawler) monitorMemory() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(30 * time.Second) // 每30秒监控一次
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			
+			// 转换为MB
+			allocMB := float64(m.Alloc) / 1024 / 1024
+			totalAllocMB := float64(m.TotalAlloc) / 1024 / 1024
+			sysMB := float64(m.Sys) / 1024 / 1024
+			numGC := m.NumGC
+			
+			// 如果内存使用超过400MB，触发GC
+			if allocMB > 400 {
+				runtime.GC()
+				runtime.ReadMemStats(&m)
+				allocMB = float64(m.Alloc) / 1024 / 1024
+				log.Printf("[内存监控] 内存使用较高，已触发GC: 当前分配=%.2fMB, 系统内存=%.2fMB, GC次数=%d", allocMB, sysMB, numGC)
+			} else {
+				log.Printf("[内存监控] 当前分配=%.2fMB, 累计分配=%.2fMB, 系统内存=%.2fMB, GC次数=%d", allocMB, totalAllocMB, sysMB, numGC)
+			}
+		case <-c.stopChan:
+			return
+		}
+	}
+}
+
+// cleanupTempFiles 定期清理临时文件目录中的旧文件
+func (c *Crawler) cleanupTempFiles() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(1 * time.Minute) // 每分钟清理一次
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ticker.C:
+			c.cleanupOldTempFiles()
+		case <-c.stopChan:
+			return
+		}
+	}
+}
+
+// cleanupOldTempFiles 清理超过1分钟的临时文件
+func (c *Crawler) cleanupOldTempFiles() {
+	if c.tempFileDir == "" {
+		return
+	}
+	
+	entries, err := os.ReadDir(c.tempFileDir)
+	if err != nil {
+		return
+	}
+	
+	now := time.Now()
+	cleanedCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		// 只清理.tmp文件
+		if !strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+		
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		
+		// 清理超过1分钟的临时文件
+		if now.Sub(info.ModTime()) > 1*time.Minute {
+			filePath := filepath.Join(c.tempFileDir, entry.Name())
+			if err := os.Remove(filePath); err == nil {
+				cleanedCount++
+			}
+		}
+	}
+	
+	if cleanedCount > 0 {
+		log.Printf("[清理] 已清理 %d 个临时文件", cleanedCount)
+	}
+}
+
+// cleanupAllTempFiles 清理所有临时文件
+func (c *Crawler) cleanupAllTempFiles() {
+	if c.tempFileDir == "" {
+		return
+	}
+	
+	entries, err := os.ReadDir(c.tempFileDir)
+	if err != nil {
+		return
+	}
+	
+	cleanedCount := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			filePath := filepath.Join(c.tempFileDir, entry.Name())
+			if err := os.Remove(filePath); err == nil {
+				cleanedCount++
+			}
+		}
+	}
+	
+	if cleanedCount > 0 {
+		log.Printf("[清理] 停止时清理了 %d 个临时文件", cleanedCount)
+	}
+}
+
 func (c *Crawler) printStats() {
 	stats := c.stats
 
@@ -561,6 +691,10 @@ func (c *Crawler) Stop() {
 
 	c.pool.Close()
 	c.domainMonitor.Stop()
+	
+	// 清理所有临时文件
+	c.cleanupAllTempFiles()
+	
 	c.printStats()
 	log.Println("爬虫已停止")
 }
