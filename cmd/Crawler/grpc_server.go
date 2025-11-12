@@ -43,7 +43,8 @@ func (c *Crawler) startGRPCServer() error {
 			return fmt.Errorf("创建 KCP 配置失败: kcpConfig 为 nil")
 		}
 		log.Printf("[gRPC] 创建 KCP 服务器，配置: %+v", kcpConfig)
-		server, listenerFactory := taskapi.NewServerKCP(kcpConfig)
+		var listenerFactory func(string) (net.Listener, error)
+		server, listenerFactory = taskapi.NewServerKCP(kcpConfig)
 		log.Printf("[gRPC] NewServerKCP 返回: server=%v, listenerFactory=%v", server != nil, listenerFactory != nil)
 		if server == nil {
 			return fmt.Errorf("创建 gRPC KCP 服务器失败: server 为 nil")
