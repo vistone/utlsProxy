@@ -124,8 +124,9 @@ func NewDomainHotConnPool(config DomainConnPoolConfig) (HotConnPool, error) {
 	}
 	if config.MaxConns == 0 {
 		// 降低默认连接池大小，避免占用过多内存
-		// channel缓冲区大小 = MaxConns，每个连接对象约几KB，10000个连接约几十MB
-		config.MaxConns = 10000
+		// channel缓冲区大小 = MaxConns，每个连接对象约几KB到几十KB
+		// 2000个连接约20-40MB，足够处理500并发请求
+		config.MaxConns = 2000
 	}
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 5 * time.Minute
