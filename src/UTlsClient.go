@@ -174,6 +174,7 @@ func (c *UTlsClient) Do(req *UTlsRequest) (*UTlsResponse, error) {
 
 		if connMeta.HttpClient != nil { // HTTP/2 path
 			ctx, cancel := context.WithTimeout(context.Background(), remainingTimeout)
+			// 确保context在函数返回时被取消，释放相关资源
 			defer cancel()
 			statusCode, body, err = c.sendHTTP2Request(ctx, connMeta.HttpClient, req)
 		} else { // HTTP/1.1 path
@@ -275,10 +276,21 @@ func (c *UTlsClient) sendHTTP2Request(ctx context.Context, client *http.Client, 
 	if err != nil {
 		return 0, nil, fmt.Errorf("发送HTTP/2请求失败: %w", err)
 	}
-	defer resp.Body.Close()
+	
+	// 确保响应体被完全读取和关闭，以便连接可以复用
+	// 这对于HTTP/2连接复用非常重要
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			// 读取并丢弃剩余数据（如果有），确保连接可以复用
+			// 即使io.ReadAll已经读取了所有数据，这里也能确保连接状态正确
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		// 读取失败时，defer会确保响应体被完全读取以便连接可以复用
 		return resp.StatusCode, nil, fmt.Errorf("读取HTTP/2响应体失败: %w", err)
 	}
 
