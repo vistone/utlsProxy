@@ -3,6 +3,9 @@ package taskapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -110,11 +113,39 @@ func NewServer(opts ...grpc.ServerOption) *grpc.Server {
 	return grpc.NewServer(base...)
 }
 
+// formatAddress 格式化地址，确保IPv6地址使用方括号包裹
+func formatAddress(address string) string {
+	// 如果地址已经包含方括号，直接返回
+	if strings.Contains(address, "[") && strings.Contains(address, "]") {
+		return address
+	}
+	
+	// 尝试解析地址，检查是否是IPv6地址
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		// 如果解析失败，可能是格式不正确，直接返回原地址
+		return address
+	}
+	
+	// 解析IP地址
+	ip := net.ParseIP(host)
+	if ip != nil && ip.To4() == nil && ip.To16() != nil {
+		// 是IPv6地址，使用方括号包裹
+		return fmt.Sprintf("[%s]:%s", host, port)
+	}
+	
+	// IPv4地址或域名，直接返回
+	return address
+}
+
 func Dial(address string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	// 格式化地址，确保IPv6地址使用方括号
+	formattedAddr := formatAddress(address)
+	
 	base := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(JSONCodec)),
 	}
 	base = append(base, opts...)
-	return grpc.Dial(address, base...)
+	return grpc.Dial(formattedAddr, base...)
 }

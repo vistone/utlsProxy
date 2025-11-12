@@ -2,7 +2,9 @@ package taskapi
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"strings"
 
 	kcp "github.com/xtaci/kcp-go/v5"
 	"google.golang.org/grpc"
@@ -105,7 +107,9 @@ func NewKCPDialer(config *KCPConfig) func(context.Context, string) (net.Conn, er
 	}
 
 	return func(ctx context.Context, address string) (net.Conn, error) {
-		conn, err := kcp.DialWithOptions(address, nil, config.DataShard, config.ParityShard)
+		// 格式化地址，确保IPv6地址使用方括号
+		formattedAddr := formatKCPAddress(address)
+		conn, err := kcp.DialWithOptions(formattedAddr, nil, config.DataShard, config.ParityShard)
 		if err != nil {
 			return nil, err
 		}
@@ -121,15 +125,43 @@ func NewKCPDialer(config *KCPConfig) func(context.Context, string) (net.Conn, er
 	}
 }
 
+// formatKCPAddress 格式化KCP地址，确保IPv6地址使用方括号包裹
+func formatKCPAddress(address string) string {
+	// 如果地址已经包含方括号，直接返回
+	if strings.Contains(address, "[") && strings.Contains(address, "]") {
+		return address
+	}
+	
+	// 尝试解析地址，检查是否是IPv6地址
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		// 如果解析失败，可能是格式不正确，直接返回原地址
+		return address
+	}
+	
+	// 解析IP地址
+	ip := net.ParseIP(host)
+	if ip != nil && ip.To4() == nil && ip.To16() != nil {
+		// 是IPv6地址，使用方括号包裹
+		return fmt.Sprintf("[%s]:%s", host, port)
+	}
+	
+	// IPv4地址或域名，直接返回
+	return address
+}
+
 // DialKCP 使用KCP协议连接gRPC服务器
 func DialKCP(address string, kcpConfig *KCPConfig, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	// 格式化地址，确保IPv6地址使用方括号
+	formattedAddr := formatKCPAddress(address)
+	
 	base := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(JSONCodec)),
 		grpc.WithContextDialer(NewKCPDialer(kcpConfig)),
 	}
 	base = append(base, opts...)
-	return grpc.Dial(address, base...)
+	return grpc.Dial(formattedAddr, base...)
 }
 
 // NewServerKCP 创建使用KCP传输的gRPC服务器

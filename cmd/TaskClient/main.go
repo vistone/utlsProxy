@@ -17,6 +17,9 @@ import (
 
 func main() {
 	const (
+		// serverAddress 支持IPv4和IPv6地址
+		// IPv4格式: "172.93.47.57:9091"
+		// IPv6格式: "[2607:8700:5500:2943::cc67]:9091" 或 "2607:8700:5500:2943::cc67:9091"（会自动格式化）
 		serverAddress   = "172.93.47.57:9091"
 		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3142!2u1003"
 		defaultClientID = "1"

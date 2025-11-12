@@ -851,7 +851,15 @@ func (p *LocalIPPool) cleanupCreatedIPv6Addresses() {
 	}
 
 	cleaned := 0
+	skipped := 0
 	for ipStr := range p.createdIPv6Addrs {
+		// 检查是否是系统保留地址，如果是则跳过
+		ip := net.ParseIP(ipStr)
+		if ip != nil && isReservedIPv6Address(ip) {
+			skipped++
+			continue
+		}
+		
 		// 使用 ip addr del 命令删除地址
 		cmd := exec.Command("ip", "addr", "del", ipStr+"/128", "dev", interfaceName)
 		if err := cmd.Run(); err != nil {
@@ -860,6 +868,10 @@ func (p *LocalIPPool) cleanupCreatedIPv6Addresses() {
 		} else {
 			cleaned++
 		}
+	}
+	
+	if skipped > 0 {
+		fmt.Printf("[IP池] 清理时跳过了 %d 个系统保留地址（如 ::2）\n", skipped)
 	}
 
 	if cleaned > 0 {
@@ -891,6 +903,12 @@ func (p *LocalIPPool) ReleaseIP(ip net.IP) {
 
 	if !isUsed {
 		return // 地址未在使用中，无需释放
+	}
+
+	// 检查是否是系统保留地址，如果是则跳过删除
+	if isReservedIPv6Address(ip) {
+		fmt.Printf("[IP池] 跳过删除系统保留地址: %s\n", ipStr)
+		return
 	}
 
 	// 删除IPv6地址
@@ -1156,7 +1174,16 @@ func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, int
 // batchDeleteIPv6Addresses 批量删除IPv6地址（删除指定的地址列表）
 func (p *LocalIPPool) batchDeleteIPv6Addresses(count int, interfaceName string, addrsToDelete []string) {
 	deleted := 0
+	skipped := 0
 	for _, ipStr := range addrsToDelete {
+		// 检查是否是系统保留地址，如果是则跳过
+		ip := net.ParseIP(ipStr)
+		if ip != nil && isReservedIPv6Address(ip) {
+			skipped++
+			fmt.Printf("[IP池] 跳过删除系统保留地址: %s\n", ipStr)
+			continue
+		}
+		
 		// 删除地址
 		cmd := exec.Command("ip", "addr", "del", ipStr+"/128", "dev", interfaceName)
 		if err := cmd.Run(); err != nil {
@@ -1173,6 +1200,10 @@ func (p *LocalIPPool) batchDeleteIPv6Addresses(count int, interfaceName string, 
 		p.activeIPv6Mutex.Unlock()
 
 		deleted++
+	}
+	
+	if skipped > 0 {
+		fmt.Printf("[IP池] 批量删除: 跳过了 %d 个系统保留地址（如 ::2）\n", skipped)
 	}
 
 	if deleted > 0 {
@@ -1278,11 +1309,15 @@ func (p *LocalIPPool) cleanupUnusedIPv6Addresses() {
 
 	activeCount := len(p.activeIPv6Addrs)
 	
-	// 找出未使用的地址（空闲地址）
+	// 找出未使用的地址（空闲地址），但排除系统保留地址（如 ::2）
 	unusedAddrs := make([]string, 0)
 	for addr := range p.activeIPv6Addrs {
 		if !p.usedIPv6Addrs[addr] {
-			unusedAddrs = append(unusedAddrs, addr)
+			// 检查是否是系统保留地址，如果是则跳过
+			ip := net.ParseIP(addr)
+			if ip != nil && !isReservedIPv6Address(ip) {
+				unusedAddrs = append(unusedAddrs, addr)
+			}
 		}
 	}
 
