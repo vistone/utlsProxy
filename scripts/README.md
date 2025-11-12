@@ -1,10 +1,60 @@
-# 版本管理脚本
+# 脚本目录
 
-本目录包含版本管理和发布相关的脚本。
+本目录包含版本管理、发布和安装相关的脚本。
 
 ## 脚本说明
 
-### 1. bump_version.sh
+### 1. install.sh / install.ps1
+
+一键安装脚本，从 GitHub 下载并安装 utlsProxy。
+
+**Linux/macOS 用法**:
+```bash
+# 方式1: 直接下载并执行
+curl -fsSL https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install.sh | bash
+
+# 方式2: 下载后执行
+wget https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install.sh
+chmod +x install.sh
+./install.sh
+
+# 方式3: 指定版本安装
+./install.sh v1.0.4
+```
+
+**Windows 用法**:
+```powershell
+# 方式1: 直接下载并执行
+irm https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install.ps1 | iex
+
+# 方式2: 下载后执行
+powershell -ExecutionPolicy Bypass -File install.ps1
+
+# 方式3: 指定版本安装
+powershell -ExecutionPolicy Bypass -File install.ps1 v1.0.4
+```
+
+**功能**:
+- 自动检测操作系统和架构（Linux/macOS/Windows, amd64/arm64）
+- 优先从 GitHub Releases 下载预编译二进制文件
+- 如果没有预编译文件，则从源码编译安装
+- 自动安装到系统路径（Linux/macOS: `/usr/local/bin`, Windows: `C:\Program Files\utlsProxy`）
+- 支持安装所有可执行程序（DNS监控、Crawler、TaskClient）
+
+**环境要求**:
+- 如果使用预编译二进制：无需额外依赖
+- 如果从源码编译：需要 Go 1.25+ 和 Git
+
+**自定义安装目录**:
+```bash
+# Linux/macOS
+INSTALL_DIR=/opt/utlsProxy ./install.sh
+
+# Windows PowerShell
+$env:INSTALL_DIR="C:\MyTools\utlsProxy"; .\install.ps1
+```
+
+### 2. bump_version.sh
 
 自动增加版本号脚本。
 
@@ -35,7 +85,7 @@
 ./scripts/bump_version.sh major
 ```
 
-### 2. create_release.sh
+### 3. create_release.sh
 
 创建GitHub Release脚本。
 
@@ -58,7 +108,7 @@
 ./scripts/create_release.sh v1.0.1 "修复热连接池问题"
 ```
 
-### 3. commit_and_release.sh
+### 4. commit_and_release.sh
 
 一键提交并创建Release脚本（推荐使用）。
 

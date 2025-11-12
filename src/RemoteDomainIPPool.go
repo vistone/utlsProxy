@@ -231,6 +231,9 @@ func (m *remoteIPMonitor) processSingleDomain(domain string) { // 处理单个�
 	}
 	fmt.Printf("域名 [%s]: 从 %s 加载了 %d 个已知IP。\n", domain, filePath, len(domainKnownIPs)) // 输出加载日志
 
+	// 及时发布历史数据，避免首次DNS解析耗时导致的数据不可用
+	m.setLatestDomainData(domain, domainPool)
+
 	// 3. 并发解析此域名的当前IP
 	currentIPv4s, currentIPv6s, _ := m.resolveDomainConcurrently(domain) // 并发解析域名IP
 	currentIPs := append(currentIPv4s, currentIPv6s...)                  // 合并IPv4和IPv6地址
@@ -271,9 +274,7 @@ func (m *remoteIPMonitor) processSingleDomain(domain string) { // 处理单个�
 	}
 
 	// 6. 更新内存缓存和文件
-	m.mu.Lock()                       // 加锁
-	m.latestData[domain] = domainPool // 更新内存缓存
-	m.mu.Unlock()                     // 解锁
+	m.setLatestDomainData(domain, domainPool)
 
 	if err := m.saveDomainData(filePath, domainPool); err != nil { // 保存域名数据
 		fmt.Printf("错误: 域名 [%s] 无法将结果保存到文件 %s: %v\n", domain, filePath, err) // 输出错误日志
@@ -408,6 +409,34 @@ func uniqueStrings(slice []string) []string {
 		}
 	}
 	return list // 返回去重后的列表
+}
+
+// setLatestDomainData 使用深拷贝更新指定域名的缓存数据，确保外部读取线程安全。
+// 参数：domain - 域名；data - 最新的数据
+func (m *remoteIPMonitor) setLatestDomainData(domain string, data map[string][]IPRecord) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.latestData[domain] = cloneDomainPool(data)
+}
+
+// cloneDomainPool 对域名数据进行深拷贝，避免共享底层切片带来的数据竞争。
+// 参数：data - 原始数据
+// 返回值：深拷贝后的数据
+func cloneDomainPool(data map[string][]IPRecord) map[string][]IPRecord {
+	if data == nil {
+		return nil
+	}
+	cloned := make(map[string][]IPRecord, len(data))
+	for key, records := range data {
+		if len(records) == 0 {
+			cloned[key] = nil
+			continue
+		}
+		copied := make([]IPRecord, len(records))
+		copy(copied, records)
+		cloned[key] = copied
+	}
+	return cloned
 }
 
 // saveDomainData 将单个域名的数据保存到指定文件，并在写入前自动创建目录。

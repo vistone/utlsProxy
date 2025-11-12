@@ -5,6 +5,12 @@
 *.so
 *.dylib
 
+# Compiled binaries (项目根目录下的可执行文件)
+/Crawler
+/crawler
+/dns-monitor
+/task-client
+
 # Test binary, built with `go test -c`
 *.test
 

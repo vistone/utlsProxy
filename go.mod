@@ -7,6 +7,7 @@ require (
 	github.com/miekg/dns v1.1.68
 	github.com/refraction-networking/utls v1.8.1
 	golang.org/x/net v0.46.0
+	google.golang.org/grpc v1.67.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -19,4 +20,6 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	golang.org/x/tools v0.38.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240814211410-ddb44dafa142 // indirect
+	google.golang.org/protobuf v1.34.2 // indirect
 )

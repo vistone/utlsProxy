@@ -1,5 +1,5 @@
 [ServerConfig]
-Version="v1.0.4"
+Version="v1.0.6"
 ServerPort=9091
 
 [DNSDomain]
@@ -45,7 +45,7 @@ IPv6QueueSize = 100 # IPv6地址队列缓冲区大小
 # 连接池基础配置
 Domain = "kh.google.com" # 目标域名
 Port = "443" # 目标端口
-MaxConns = 10000 # 最大连接数（健康池和不健康池各10000个，总共20000个连接）
+MaxConns = 1000000 # 最大连接数（健康池和不健康池各100万，实际上无限制，可以容纳所有成功的连接）
 IdleTimeoutMinutes = 5 # 连接空闲超时时间（分钟）
 
 # 预热配置
