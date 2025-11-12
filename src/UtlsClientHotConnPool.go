@@ -123,7 +123,9 @@ func NewDomainHotConnPool(config DomainConnPoolConfig) (HotConnPool, error) {
 		config.Port = "443"
 	}
 	if config.MaxConns == 0 {
-		config.MaxConns = 1000000
+		// 降低默认连接池大小，避免占用过多内存
+		// channel缓冲区大小 = MaxConns，每个连接对象约几KB，10000个连接约几十MB
+		config.MaxConns = 10000
 	}
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 5 * time.Minute
@@ -649,28 +651,66 @@ func (p *domainConnPool) refreshTargetIPList() {
 	p.ipListMutex.Unlock()
 }
 func (p *domainConnPool) startBackgroundTasks() {
-	if p.ipRefreshInterval <= 0 {
-		return
-	}
+	// IP刷新任务
+	if p.ipRefreshInterval > 0 {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			ticker := time.NewTicker(p.ipRefreshInterval)
+			defer ticker.Stop()
 
+			for {
+				select {
+				case <-ticker.C:
+					p.refreshTargetIPList()
+					if atomic.LoadInt32(&p.autoWarmupEnabled) == 1 {
+						p.processPendingWarmups()
+					}
+				case <-p.stopChan:
+					return
+				}
+			}
+		}()
+	}
+	
+	// IP统计清理任务：每30分钟清理一次旧的统计信息
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		ticker := time.NewTicker(p.ipRefreshInterval)
+		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				p.refreshTargetIPList()
-				if atomic.LoadInt32(&p.autoWarmupEnabled) == 1 {
-					p.processPendingWarmups()
-				}
+				p.cleanupIPStats()
 			case <-p.stopChan:
 				return
 			}
 		}
 	}()
+}
+
+// cleanupIPStats 清理旧的IP统计信息，保持最大条目数
+func (p *domainConnPool) cleanupIPStats() {
+	p.ipStatsMutex.Lock()
+	defer p.ipStatsMutex.Unlock()
+	
+	const maxStatsEntries = 5000 // 最多保存5000个IP的统计信息
+	
+	if len(p.ipStatsMap) > maxStatsEntries {
+		// 如果超过最大条目数，清理一半
+		toDelete := len(p.ipStatsMap) - maxStatsEntries/2
+		deleted := 0
+		for ip := range p.ipStatsMap {
+			if deleted >= toDelete {
+				break
+			}
+			delete(p.ipStatsMap, ip)
+			deleted++
+		}
+		fmt.Printf("[连接池] IP统计清理: 删除了 %d 个旧条目，当前剩余 %d 个\n", deleted, len(p.ipStatsMap))
+	}
 }
 func (p *domainConnPool) getLocalIP() (string, bool) {
 	if p.localIPv6Pool != nil {

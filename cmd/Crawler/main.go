@@ -70,13 +70,60 @@ type CrawlerStats struct {
 type SlowIPTracker struct {
 	threshold time.Duration
 	counts    sync.Map
+	maxEntries int // 最大条目数，超过后清理旧数据
+	lastCleanup time.Time
+	cleanupMutex sync.Mutex
 }
 
 // NewSlowIPTracker 创建慢速IP跟踪器
 func NewSlowIPTracker(threshold time.Duration) *SlowIPTracker {
-	return &SlowIPTracker{
+	tracker := &SlowIPTracker{
 		threshold: threshold,
+		maxEntries: 1000, // 最多保存1000个慢IP记录
+		lastCleanup: time.Now(),
 	}
+	// 启动定期清理goroutine
+	go tracker.periodicCleanup()
+	return tracker
+}
+
+// periodicCleanup 定期清理旧的慢IP记录
+func (t *SlowIPTracker) periodicCleanup() {
+	ticker := time.NewTicker(10 * time.Minute) // 每10分钟清理一次
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		t.cleanupOldEntries()
+	}
+}
+
+// cleanupOldEntries 清理旧的条目，保持最大条目数
+func (t *SlowIPTracker) cleanupOldEntries() {
+	t.cleanupMutex.Lock()
+	defer t.cleanupMutex.Unlock()
+	
+	// 统计当前条目数
+	count := 0
+	t.counts.Range(func(key, value any) bool {
+		count++
+		return true
+	})
+	
+	// 如果超过最大条目数，清理一半
+	if count > t.maxEntries {
+		toDelete := count - t.maxEntries/2
+		deleted := 0
+		t.counts.Range(func(key, value any) bool {
+			if deleted < toDelete {
+				t.counts.Delete(key)
+				deleted++
+			}
+			return deleted < toDelete
+		})
+		log.Printf("[慢IP跟踪] 清理了 %d 个旧条目，当前剩余 %d 个", deleted, count-deleted)
+	}
+	
+	t.lastCleanup = time.Now()
 }
 
 // Record 如果响应耗时超过阈值则记录并返回累计次数
