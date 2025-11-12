@@ -964,7 +964,6 @@ func isReservedIPv6Address(ip net.IP) bool {
 		return false
 	}
 	
-	ipStr := ip.String()
 	// 检查是否是常见的系统保留地址
 	// ::1 - 回环地址
 	// ::2 - 通常是网关地址或系统保留地址
@@ -976,7 +975,17 @@ func isReservedIPv6Address(ip net.IP) bool {
 	}
 	
 	// 检查是否是 ::2 地址（通常是网关地址）
-	if strings.HasSuffix(ipStr, "::2") || strings.HasSuffix(ipStr, ":2") {
+	// 方法：检查最后16位是否为 ::2（即最后4个字节为 0, 0, 0, 2）
+	if len(ip) == 16 {
+		// 检查最后4个字节是否为 0, 0, 0, 2
+		if ip[12] == 0 && ip[13] == 0 && ip[14] == 0 && ip[15] == 2 {
+			return true
+		}
+	}
+	
+	// 也检查字符串表示，确保兼容性（精确匹配 ::2 后缀）
+	ipStr := ip.String()
+	if strings.HasSuffix(ipStr, "::2") {
 		return true
 	}
 	
@@ -1026,8 +1035,15 @@ func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 
 		// 检查地址是否属于子网
 		if subnet.Contains(ip) {
-			// 跳过系统保留地址（如 ::2）
+			// 跳过系统保留地址（如 ::2），但需要将它们添加到活跃地址列表中
 			if isReservedIPv6Address(ip) {
+				// 将保留地址添加到活跃地址列表中，确保它们被正确管理
+				p.createdIPv6Mutex.Lock()
+				p.createdIPv6Addrs[addrStr] = true
+				p.createdIPv6Mutex.Unlock()
+				p.activeIPv6Mutex.Lock()
+				p.activeIPv6Addrs[addrStr] = true
+				p.activeIPv6Mutex.Unlock()
 				skipped++
 				continue
 			}
