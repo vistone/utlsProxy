@@ -16,9 +16,9 @@ import (
 func main() {
 	const (
 		serverAddress   = "172.93.47.57:9091"
-		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3150!2u1003"
+		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3142!2u1003"
 		defaultClientID = "1"
-		repeatCount     = 20000
+		repeatCount     = 50000
 		concurrency     = 500
 		requestTimeout  = 20 * time.Second // 增加超时时间以应对慢速IP
 		rpcMaxAttempts  = 5

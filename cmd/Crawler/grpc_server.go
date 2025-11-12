@@ -181,17 +181,24 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 			// 读取文件内容到内存（短暂占用，读取完立即传输，传输完立即释放）
 			// 注意：由于gRPC Unary调用的限制，无法真正的流式传输
 			// 但写入文件后立即读取，可以避免在HTTP响应读取和gRPC传输之间同时占用内存
+			// 使用defer确保临时文件一定会被删除
+			defer func() {
+				if err := os.Remove(tempFile); err != nil {
+					if !os.IsNotExist(err) {
+						log.Printf("[gRPC] 警告: 删除临时文件失败: %v (文件: %s)", err, tempFile)
+					}
+				}
+			}()
+			
 			fileData, err := os.ReadFile(tempFile)
 			if err != nil {
 				log.Printf("[gRPC] 警告: 读取临时文件失败: %v，将返回错误", err)
 				resp.ErrorMessage = fmt.Sprintf("读取临时文件失败: %v", err)
-				os.Remove(tempFile) // 清理临时文件
-				return resp, nil
+				return resp, nil // defer会删除临时文件
 			}
 			
-			// 设置响应体，立即删除临时文件
+			// 设置响应体，defer会确保临时文件被删除
 			resp.Body = fileData
-			os.Remove(tempFile) // 立即删除临时文件，释放磁盘空间
 		}
 	} else {
 		// 小响应体：直接内存传输

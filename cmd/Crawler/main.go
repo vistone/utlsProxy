@@ -581,7 +581,7 @@ func (c *Crawler) monitorMemory() {
 // cleanupTempFiles 定期清理临时文件目录中的旧文件
 func (c *Crawler) cleanupTempFiles() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(1 * time.Minute) // 每分钟清理一次
+	ticker := time.NewTicker(30 * time.Second) // 每30秒清理一次，更及时
 	defer ticker.Stop()
 	
 	for {
@@ -594,7 +594,7 @@ func (c *Crawler) cleanupTempFiles() {
 	}
 }
 
-// cleanupOldTempFiles 清理超过1分钟的临时文件
+// cleanupOldTempFiles 清理超过30秒的临时文件（作为备用清理机制）
 func (c *Crawler) cleanupOldTempFiles() {
 	if c.tempFileDir == "" {
 		return
@@ -607,6 +607,7 @@ func (c *Crawler) cleanupOldTempFiles() {
 	
 	now := time.Now()
 	cleanedCount := 0
+	failedCount := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -622,17 +623,25 @@ func (c *Crawler) cleanupOldTempFiles() {
 			continue
 		}
 		
-		// 清理超过1分钟的临时文件
-		if now.Sub(info.ModTime()) > 1*time.Minute {
+		// 清理超过30秒的临时文件（正常情况下文件应该立即删除，这里是备用清理）
+		if now.Sub(info.ModTime()) > 30*time.Second {
 			filePath := filepath.Join(c.tempFileDir, entry.Name())
 			if err := os.Remove(filePath); err == nil {
 				cleanedCount++
+			} else {
+				failedCount++
+				if !os.IsNotExist(err) {
+					log.Printf("[清理] 警告: 删除临时文件失败: %v (文件: %s)", err, filePath)
+				}
 			}
 		}
 	}
 	
 	if cleanedCount > 0 {
 		log.Printf("[清理] 已清理 %d 个临时文件", cleanedCount)
+	}
+	if failedCount > 0 {
+		log.Printf("[清理] 警告: %d 个临时文件删除失败", failedCount)
 	}
 }
 
