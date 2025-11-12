@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 
 	"utlsProxy/internal/taskapi"
 )
@@ -70,9 +71,29 @@ func main() {
 	}
 	log.Printf("已连接到服务器（%s传输）: %s", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress)
 
-	// 检查连接状态
-	connState := conn.GetState()
-	log.Printf("连接状态: %v", connState)
+	// 等待连接就绪
+	waitForReady := func(c *grpc.ClientConn, timeout time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		for {
+			state := c.GetState()
+			if state == connectivity.Ready {
+				return nil
+			}
+			if state == connectivity.Shutdown {
+				return fmt.Errorf("连接已关闭")
+			}
+			if !c.WaitForStateChange(ctx, state) {
+				return ctx.Err()
+			}
+		}
+	}
+
+	// 等待连接就绪（最多等待5秒）
+	if err := waitForReady(conn, 5*time.Second); err != nil {
+		log.Fatalf("等待连接就绪失败: %v", err)
+	}
+	log.Printf("连接已就绪，状态: %v", conn.GetState())
 
 	defer func() { _ = conn.Close() }()
 
@@ -122,16 +143,34 @@ func main() {
 		client = taskapi.NewTaskServiceClient(conn)
 		reconnectCount++
 
-		// 检查新连接状态
-		newConnState := conn.GetState()
-		if reconnectCount <= 3 || reconnectCount%10 == 0 {
-			log.Printf("已重新连接到服务器（%s传输）: %s (重连次数: %d, 连接状态: %v)", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress, reconnectCount, newConnState)
-		}
-
 		connMutex.Unlock()
 
-		// 重连后等待一段时间，确保连接稳定
-		time.Sleep(100 * time.Millisecond)
+		// 等待连接就绪（最多等待3秒）
+		waitForReady := func(c *grpc.ClientConn, timeout time.Duration) error {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			for {
+				state := c.GetState()
+				if state == connectivity.Ready {
+					return nil
+				}
+				if state == connectivity.Shutdown {
+					return fmt.Errorf("连接已关闭")
+				}
+				if !c.WaitForStateChange(ctx, state) {
+					return ctx.Err()
+				}
+			}
+		}
+
+		if err := waitForReady(conn, 3*time.Second); err != nil {
+			return fmt.Errorf("等待连接就绪失败: %w", err)
+		}
+
+		if reconnectCount <= 3 || reconnectCount%10 == 0 {
+			log.Printf("已重新连接到服务器（%s传输）: %s (重连次数: %d, 连接状态: %v)", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress, reconnectCount, conn.GetState())
+		}
+
 		return nil
 	}
 
@@ -179,7 +218,51 @@ func main() {
 					// 获取当前客户端连接（可能需要加锁）
 					connMutex.Lock()
 					currentClient := client
+					currentConn := conn
 					connMutex.Unlock()
+
+					// 检查连接状态，如果不是 READY 则等待或重连
+					if currentConn != nil {
+						state := currentConn.GetState()
+						if state != connectivity.Ready {
+							if idx < 5 {
+								log.Printf("[任务 %d] 连接状态不是 READY: %v，等待或重连", idx, state)
+							}
+							// 如果连接正在连接中，等待一小段时间
+							if state == connectivity.Connecting {
+								cancel() // 取消当前上下文
+								time.Sleep(200 * time.Millisecond)
+								// 再次检查状态
+								connMutex.Lock()
+								if conn != nil && conn.GetState() == connectivity.Ready {
+									currentClient = client
+									currentConn = conn
+								}
+								connMutex.Unlock()
+								// 重新创建上下文
+								ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
+							} else if state == connectivity.TransientFailure || state == connectivity.Shutdown {
+								// 连接失败，尝试重连
+								cancel() // 取消当前上下文
+								if reconnectErr := reconnect(); reconnectErr == nil {
+									connMutex.Lock()
+									currentClient = client
+									currentConn = conn
+									connMutex.Unlock()
+									// 重新创建上下文后继续循环
+									ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
+									// 继续循环，重新检查连接状态
+									continue
+								} else {
+									// 重连失败，等待后继续
+									time.Sleep(rpcRetryDelay)
+									// 重新创建上下文
+									ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
+									continue
+								}
+							}
+						}
+					}
 
 					// 调试日志：记录请求发送
 					if idx < 5 || idx%1000 == 0 {
@@ -233,14 +316,18 @@ func main() {
 
 						if isConnectionError && attempt < rpcMaxAttempts {
 							// 尝试重连（只在不是最后一次尝试时重连）
+							cancel() // 取消当前上下文
 							if reconnectErr := reconnect(); reconnectErr == nil {
-								// 重连成功，继续重试请求（reconnect内部已经等待了200ms）
+								// 重连成功，重新创建上下文并重试请求
+								ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
 								continue // 重试请求
 							} else {
 								// 重连失败或被限制，等待后继续
 								if attempt == rpcMaxAttempts-1 {
 									log.Printf("[任务 %d] 重连失败或被限制（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, reconnectErr)
 								}
+								// 重新创建上下文
+								ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
 							}
 						}
 
@@ -249,6 +336,7 @@ func main() {
 							log.Printf("[任务 %d] gRPC 调用失败（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, err)
 						}
 						// 只在最后一次尝试失败时记录日志，减少日志输出
+						cancel() // 确保取消上下文
 						time.Sleep(rpcRetryDelay)
 						continue
 					}
@@ -259,9 +347,13 @@ func main() {
 							log.Printf("[任务 %d] 服务器返回错误（第 %d/%d 次）: %s (status=%d)", idx, attempt, rpcMaxAttempts, resp.ErrorMessage, resp.StatusCode)
 						}
 						// 只在最后一次尝试失败时记录日志，减少日志输出
+						cancel() // 确保取消上下文
 						time.Sleep(rpcRetryDelay)
 						continue
 					}
+					
+					// 请求成功，取消上下文
+					cancel()
 
 					atomic.AddUint64(&successCount, 1)
 
