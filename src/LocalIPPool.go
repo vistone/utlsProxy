@@ -249,8 +249,24 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 		// 如果队列为空，此操作会阻塞，直到后台生产者放入新的地址。
 		ip := <-ipv6Queue // 从IPv6队列获取地址
 		
-		// 确保IPv6地址在系统上已创建
+		// 再次检查地址池是否已达到目标数量（可能在等待队列时发生了变化）
 		if ip != nil {
+			p.activeIPv6Mutex.RLock()
+			currentActiveCount := len(p.activeIPv6Addrs)
+			p.activeIPv6Mutex.RUnlock()
+			
+			p.mu.RLock()
+			currentMinActive := p.minActiveAddrs
+			p.mu.RUnlock()
+			
+			// 如果地址池已达到目标数量，不应该创建新地址，应该等待复用
+			if currentMinActive > 0 && currentActiveCount >= currentMinActive {
+				// 地址池已满，等待一段时间后重试复用
+				time.Sleep(100 * time.Millisecond)
+				return p.GetIP()
+			}
+			
+			// 地址池未满，创建新地址
 			p.ensureIPv6AddressCreated(ip)
 			// 标记地址为正在使用
 			p.usedIPv6Mutex.Lock()
@@ -986,7 +1002,8 @@ func (p *LocalIPPool) adjustIPv6AddressPool() {
 }
 
 // batchCreateIPv6Addresses 批量创建IPv6地址
-func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, interfaceName string) {
+// 返回值：实际创建的地址数量
+func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, interfaceName string) int {
 	created := 0
 	for i := 0; i < count; i++ {
 		ip := p.generateRandomIPInSubnet()
@@ -996,7 +1013,17 @@ func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, int
 
 		ipStr := ip.String()
 
-		// 检查地址是否已存在
+		// 检查地址是否已在活跃地址列表中
+		p.activeIPv6Mutex.RLock()
+		alreadyActive := p.activeIPv6Addrs[ipStr]
+		p.activeIPv6Mutex.RUnlock()
+		
+		if alreadyActive {
+			// 地址已在活跃列表中，跳过
+			continue
+		}
+
+		// 检查地址是否已在系统上存在
 		if p.isIPv6AddressExists(ipStr) {
 			// 地址已存在，记录但不创建
 			p.createdIPv6Mutex.Lock()
@@ -1005,13 +1032,14 @@ func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, int
 			p.activeIPv6Mutex.Lock()
 			p.activeIPv6Addrs[ipStr] = true
 			p.activeIPv6Mutex.Unlock()
+			created++ // 记录为已创建（虽然实际没创建，但已存在）
 			continue
 		}
 
-		// 创建地址
+		// 创建地址（批量创建时不打印单个地址的日志，避免日志过多）
 		cmd := exec.Command("ip", "addr", "add", ipStr+"/128", "dev", interfaceName)
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("[IP池] 警告: 批量创建IPv6地址 %s 失败: %v\n", ipStr, err)
+			// 创建失败，静默跳过（批量创建时不需要每个都打印）
 			continue
 		}
 
@@ -1026,9 +1054,7 @@ func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, int
 		created++
 	}
 
-	if created > 0 {
-		fmt.Printf("[IP池] 热加载: 批量创建了 %d 个IPv6地址\n", created)
-	}
+	return created
 }
 
 // batchDeleteIPv6Addresses 批量删除IPv6地址（删除指定的地址列表）
@@ -1089,8 +1115,9 @@ func (p *LocalIPPool) SetTargetIPCount(count int) {
 		if activeCount < count {
 			needed := count - activeCount
 			// 一次性创建所有需要的地址，确保与RemoteDomainIPPool完全对等
-			p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
-			fmt.Printf("[IP池] 已创建 %d 个IPv6地址，与目标IP数量对等（总数: %d，RemoteDomainIPPool: %d）\n", needed, count, count)
+			// 注意：batchCreateIPv6Addresses会直接创建地址，不会调用ensureIPv6AddressCreated
+			createdCount := p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
+			fmt.Printf("[IP池] 已批量创建 %d 个IPv6地址，与目标IP数量对等（总数: %d，RemoteDomainIPPool: %d）\n", createdCount, count, count)
 		} else if activeCount > count {
 			// 如果当前活跃地址超过目标值，删除多余的未使用地址
 			p.activeIPv6Mutex.RLock()
