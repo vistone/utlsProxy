@@ -4241,6 +4241,20 @@
         "org": "AS15169 Google LLC",
         "timezone": "Africa/Lagos"
       }
+    },
+    {
+      "ip": "142.250.207.174",
+      "ip_info": {
+        "ip": "142.250.207.174",
+        "hostname": "pnbomb-bl-in-f14.1e100.net",
+        "city": "Mumbai",
+        "region": "Maharashtra",
+        "country": "IN",
+        "loc": "19.0728,72.8826",
+        "org": "AS15169 Google LLC",
+        "postal": "400017",
+        "timezone": "Asia/Kolkata"
+      }
     }
   ],
   "ipv6": [
@@ -8199,6 +8213,20 @@
         "org": "AS15169 Google LLC",
         "postal": "00100",
         "timezone": "Africa/Nairobi",
+        "anycast": true
+      }
+    },
+    {
+      "ip": "2607:f8b0:400a:80b::200e",
+      "ip_info": {
+        "ip": "2607:f8b0:400a:80b::200e",
+        "city": "Mountain View",
+        "region": "California",
+        "country": "US",
+        "loc": "38.0088,-122.1175",
+        "org": "AS15169 Google LLC",
+        "postal": "94043",
+        "timezone": "America/Los_Angeles",
         "anycast": true
       }
     }
