@@ -202,11 +202,22 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 	p.mu.RUnlock()              // 解读锁
 	
 	// 如果minActiveAddrs未设置，说明SetTargetIPCount还没有被调用，不应该创建地址
+	// 等待一段时间后如果仍未设置，返回nil让系统自动选择（避免无限等待）
 	if hasIPv6 && minActive == 0 {
-		// 等待SetTargetIPCount被调用
-		time.Sleep(100 * time.Millisecond)
-		// 递归调用，等待地址池初始化完成
-		return p.GetIP()
+		// 等待SetTargetIPCount被调用（最多等待5次，共500ms）
+		maxRetries := 5
+		for retry := 0; retry < maxRetries; retry++ {
+			time.Sleep(100 * time.Millisecond)
+			p.mu.RLock()
+			currentMinActive := p.minActiveAddrs
+			p.mu.RUnlock()
+			if currentMinActive > 0 {
+				// SetTargetIPCount已被调用，继续正常流程
+				return p.GetIP()
+			}
+		}
+		// 等待超时，返回nil让系统自动选择（避免阻塞）
+		return nil
 	}
 
 	if hasIPv6 { // 如果支持IPv6
@@ -248,10 +259,32 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 		
 		// 如果地址池已达到目标数量，等待地址空闲，而不是创建新地址
 		if minActive > 0 && activeCount >= minActive {
-			// 所有地址都在使用中，等待一段时间后重试
-			time.Sleep(100 * time.Millisecond)
-			// 递归调用，再次尝试获取可复用的地址
-			return p.GetIP()
+			// 所有地址都在使用中，等待一段时间后重试（最多等待3次，避免无限等待）
+			// 如果多次重试后仍然没有可用地址，返回nil让系统自动选择
+			maxRetries := 3
+			for retry := 0; retry < maxRetries; retry++ {
+				time.Sleep(100 * time.Millisecond)
+				// 再次检查是否有可复用的地址
+				p.activeIPv6Mutex.RLock()
+				p.usedIPv6Mutex.RLock()
+				for addrStr := range p.activeIPv6Addrs {
+					if !p.usedIPv6Addrs[addrStr] {
+						ip := net.ParseIP(addrStr)
+						if ip != nil {
+							p.usedIPv6Mutex.RUnlock()
+							p.activeIPv6Mutex.RUnlock()
+							p.usedIPv6Mutex.Lock()
+							p.usedIPv6Addrs[addrStr] = true
+							p.usedIPv6Mutex.Unlock()
+							return ip
+						}
+					}
+				}
+				p.usedIPv6Mutex.RUnlock()
+				p.activeIPv6Mutex.RUnlock()
+			}
+			// 多次重试后仍然没有可用地址，返回nil让系统自动选择（避免阻塞）
+			return nil
 		}
 		
 		// 如果地址池未达到目标数量，才从队列中获取新地址并创建
@@ -270,14 +303,35 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 			
 		// 如果地址池已达到目标数量，不应该创建新地址，应该等待复用
 		if currentMinActive > 0 && currentActiveCount >= currentMinActive {
-			// 地址池已满，等待一段时间后重试复用
-			// 将地址放回队列（虽然不应该发生，但为了安全）
+			// 地址池已满，将地址放回队列
 			select {
 			case p.ipv6Queue <- ip:
 			default:
 			}
-			time.Sleep(100 * time.Millisecond)
-			return p.GetIP()
+			// 尝试从活跃地址中复用（最多等待3次）
+			maxRetries := 3
+			for retry := 0; retry < maxRetries; retry++ {
+				time.Sleep(100 * time.Millisecond)
+				p.activeIPv6Mutex.RLock()
+				p.usedIPv6Mutex.RLock()
+				for addrStr := range p.activeIPv6Addrs {
+					if !p.usedIPv6Addrs[addrStr] {
+						reuseIP := net.ParseIP(addrStr)
+						if reuseIP != nil {
+							p.usedIPv6Mutex.RUnlock()
+							p.activeIPv6Mutex.RUnlock()
+							p.usedIPv6Mutex.Lock()
+							p.usedIPv6Addrs[addrStr] = true
+							p.usedIPv6Mutex.Unlock()
+							return reuseIP
+						}
+					}
+				}
+				p.usedIPv6Mutex.RUnlock()
+				p.activeIPv6Mutex.RUnlock()
+			}
+			// 多次重试后仍然没有可用地址，返回nil让系统自动选择（避免阻塞）
+			return nil
 		}
 		
 		// 地址池未满，创建新地址（但这种情况不应该发生，因为应该在前面就检查了）
