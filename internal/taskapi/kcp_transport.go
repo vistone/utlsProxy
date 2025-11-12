@@ -195,12 +195,28 @@ func DialKCP(address string, kcpConfig *KCPConfig, opts ...grpc.DialOption) (*gr
 
 // NewServerKCP 创建使用KCP传输的gRPC服务器
 func NewServerKCP(kcpConfig *KCPConfig, opts ...grpc.ServerOption) (*grpc.Server, func(string) (net.Listener, error)) {
+	if kcpConfig == nil {
+		// 如果配置为 nil，使用默认配置
+		kcpConfig = DefaultKCPConfig()
+	}
+	
 	base := []grpc.ServerOption{
 		grpc.ForceServerCodec(JSONCodec),
 	}
 	base = append(base, opts...)
 	
 	server := grpc.NewServer(base...)
+	if server == nil {
+		// grpc.NewServer 不应该返回 nil，但如果返回了，我们需要处理
+		// 这种情况下，我们尝试不使用 ForceServerCodec 重新创建
+		baseWithoutCodec := []grpc.ServerOption{}
+		baseWithoutCodec = append(baseWithoutCodec, opts...)
+		server = grpc.NewServer(baseWithoutCodec...)
+		if server == nil {
+			// 如果仍然返回 nil，返回错误（通过 panic 或返回 nil）
+			panic("grpc.NewServer 返回 nil，无法创建 gRPC 服务器")
+		}
+	}
 	
 	listenerFactory := func(address string) (net.Listener, error) {
 		return NewKCPListener(address, kcpConfig)

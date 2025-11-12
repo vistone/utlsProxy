@@ -39,11 +39,20 @@ func (c *Crawler) startGRPCServer() error {
 	if c.config.ServerConfig.UseKCP {
 		// 使用KCP传输
 		kcpConfig := taskapi.DefaultKCPConfig()
+		if kcpConfig == nil {
+			return fmt.Errorf("创建 KCP 配置失败: kcpConfig 为 nil")
+		}
+		log.Printf("[gRPC] 创建 KCP 服务器，配置: %+v", kcpConfig)
 		server, listenerFactory := taskapi.NewServerKCP(kcpConfig)
+		log.Printf("[gRPC] NewServerKCP 返回: server=%v, listenerFactory=%v", server != nil, listenerFactory != nil)
 		if server == nil {
 			return fmt.Errorf("创建 gRPC KCP 服务器失败: server 为 nil")
 		}
+		if listenerFactory == nil {
+			return fmt.Errorf("创建 gRPC KCP 监听器工厂失败: listenerFactory 为 nil")
+		}
 		taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
+		log.Printf("[gRPC] 已注册 TaskServiceServer")
 		
 		listener, err = listenerFactory(address)
 		if err != nil {
@@ -72,8 +81,9 @@ func (c *Crawler) startGRPCServer() error {
 	}
 
 	// 双重检查，确保 server 和 listener 都不为 nil
+	log.Printf("[gRPC] 双重检查: server=%v, listener=%v", server != nil, listener != nil)
 	if server == nil {
-		return fmt.Errorf("gRPC 服务器未初始化: server 为 nil")
+		return fmt.Errorf("gRPC 服务器未初始化: server 为 nil (UseKCP=%v)", c.config.ServerConfig.UseKCP)
 	}
 	if listener == nil {
 		return fmt.Errorf("gRPC 监听器未初始化: listener 为 nil")
