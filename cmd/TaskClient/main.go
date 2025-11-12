@@ -73,10 +73,31 @@ func main() {
 
 	client = taskapi.NewTaskServiceClient(conn)
 
-	// 重连函数
+	// 重连函数（带重连限制和互斥锁）
+	var reconnectCount int64
+	var lastReconnectTime time.Time
+	var isReconnecting bool
+	reconnectMutex := sync.Mutex{}
+	
 	reconnect := func() error {
+		reconnectMutex.Lock()
+		defer reconnectMutex.Unlock()
+		
+		// 如果正在重连，等待
+		if isReconnecting {
+			return fmt.Errorf("正在重连中，请稍候")
+		}
+		
+		// 限制重连频率：每3秒最多重连1次
+		now := time.Now()
+		if !lastReconnectTime.IsZero() && now.Sub(lastReconnectTime) < 3*time.Second {
+			return fmt.Errorf("重连过于频繁，请稍后再试")
+		}
+		
+		isReconnecting = true
+		lastReconnectTime = now
+		
 		connMutex.Lock()
-		defer connMutex.Unlock()
 		
 		// 关闭旧连接
 		if conn != nil {
@@ -86,12 +107,25 @@ func main() {
 		// 建立新连接
 		newConn, err := establishConnection()
 		if err != nil {
+			connMutex.Unlock()
+			isReconnecting = false
 			return fmt.Errorf("重连失败: %w", err)
 		}
 		
 		conn = newConn
 		client = taskapi.NewTaskServiceClient(conn)
-		log.Printf("已重新连接到服务器（%s传输）: %s", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress)
+		reconnectCount++
+		
+		connMutex.Unlock()
+		isReconnecting = false
+		
+		// 只在重连次数较少时打印日志，避免日志过多
+		if reconnectCount <= 3 || reconnectCount%10 == 0 {
+			log.Printf("已重新连接到服务器（%s传输）: %s (重连次数: %d)", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress, reconnectCount)
+		}
+		
+		// 重连后等待一段时间，确保连接稳定
+		time.Sleep(200 * time.Millisecond)
 		return nil
 	}
 
@@ -128,12 +162,12 @@ func main() {
 				var success bool
 				for attempt := 1; attempt <= rpcMaxAttempts; attempt++ {
 					ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-					
+
 					// 获取当前客户端连接（可能需要加锁）
 					connMutex.Lock()
 					currentClient := client
 					connMutex.Unlock()
-					
+
 					resp, err := currentClient.Execute(ctx, &taskapi.TaskRequest{
 						ClientID: id,
 						Path:     requestPath,
@@ -143,20 +177,21 @@ func main() {
 					if err != nil {
 						// 检查是否是连接错误，如果是则尝试重连
 						errStr := err.Error()
-						if strings.Contains(errStr, "closed pipe") || 
-						   strings.Contains(errStr, "connection error") ||
-						   strings.Contains(errStr, "transport is closing") ||
-						   strings.Contains(errStr, "connection refused") {
-							// 尝试重连
-							if reconnectErr := reconnect(); reconnectErr != nil {
-								if attempt == rpcMaxAttempts {
-									atomic.AddUint64(&failCount, 1)
-									log.Printf("[任务 %d] gRPC 调用失败且重连失败（第 %d/%d 次）: %v (重连错误: %v)", idx, attempt, rpcMaxAttempts, err, reconnectErr)
-								}
+						isConnectionError := strings.Contains(errStr, "closed pipe") ||
+							strings.Contains(errStr, "connection error") ||
+							strings.Contains(errStr, "transport is closing") ||
+							strings.Contains(errStr, "connection refused") ||
+							strings.Contains(errStr, "Unavailable")
+						
+						if isConnectionError && attempt < rpcMaxAttempts {
+							// 尝试重连（只在不是最后一次尝试时重连）
+							if reconnectErr := reconnect(); reconnectErr == nil {
+								// 重连成功，继续重试请求（reconnect内部已经等待了200ms）
+								continue // 重试请求
 							} else {
-								// 重连成功，继续重试
-								if attempt < rpcMaxAttempts {
-									continue
+								// 重连失败或被限制，等待后继续
+								if attempt == rpcMaxAttempts-1 {
+									log.Printf("[任务 %d] 重连失败或被限制（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, reconnectErr)
 								}
 							}
 						}
