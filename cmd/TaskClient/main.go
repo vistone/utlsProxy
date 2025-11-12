@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,26 +48,52 @@ func main() {
 
 	var conn *grpc.ClientConn
 	var err error
+	var client taskapi.TaskServiceClient
+	var connMutex sync.Mutex
 
-	if useKCP {
-		// 使用KCP传输
-		kcpConfig := taskapi.DefaultKCPConfig()
-		conn, err = taskapi.DialKCP(serverAddress, kcpConfig)
-		if err != nil {
-			log.Fatalf("连接任务服务失败（KCP）: %v", err)
+	// 建立连接的辅助函数
+	establishConnection := func() (*grpc.ClientConn, error) {
+		if useKCP {
+			// 使用KCP传输
+			kcpConfig := taskapi.DefaultKCPConfig()
+			return taskapi.DialKCP(serverAddress, kcpConfig)
+		} else {
+			// 使用TCP传输（默认）
+			return taskapi.Dial(serverAddress)
 		}
-		log.Printf("已连接到服务器（KCP传输）: %s", serverAddress)
-	} else {
-		// 使用TCP传输（默认）
-		conn, err = taskapi.Dial(serverAddress)
-		if err != nil {
-			log.Fatalf("连接任务服务失败（TCP）: %v", err)
-		}
-		log.Printf("已连接到服务器（TCP传输）: %s", serverAddress)
 	}
+
+	// 初始连接
+	conn, err = establishConnection()
+	if err != nil {
+		log.Fatalf("连接任务服务失败: %v", err)
+	}
+	log.Printf("已连接到服务器（%s传输）: %s", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress)
 	defer func() { _ = conn.Close() }()
 
-	client := taskapi.NewTaskServiceClient(conn)
+	client = taskapi.NewTaskServiceClient(conn)
+
+	// 重连函数
+	reconnect := func() error {
+		connMutex.Lock()
+		defer connMutex.Unlock()
+		
+		// 关闭旧连接
+		if conn != nil {
+			_ = conn.Close()
+		}
+		
+		// 建立新连接
+		newConn, err := establishConnection()
+		if err != nil {
+			return fmt.Errorf("重连失败: %w", err)
+		}
+		
+		conn = newConn
+		client = taskapi.NewTaskServiceClient(conn)
+		log.Printf("已重新连接到服务器（%s传输）: %s", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress)
+		return nil
+	}
 
 	jobCount := repeatCount
 	workerCount := concurrency
@@ -101,13 +128,39 @@ func main() {
 				var success bool
 				for attempt := 1; attempt <= rpcMaxAttempts; attempt++ {
 					ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-					resp, err := client.Execute(ctx, &taskapi.TaskRequest{
+					
+					// 获取当前客户端连接（可能需要加锁）
+					connMutex.Lock()
+					currentClient := client
+					connMutex.Unlock()
+					
+					resp, err := currentClient.Execute(ctx, &taskapi.TaskRequest{
 						ClientID: id,
 						Path:     requestPath,
 					})
 					cancel()
 
 					if err != nil {
+						// 检查是否是连接错误，如果是则尝试重连
+						errStr := err.Error()
+						if strings.Contains(errStr, "closed pipe") || 
+						   strings.Contains(errStr, "connection error") ||
+						   strings.Contains(errStr, "transport is closing") ||
+						   strings.Contains(errStr, "connection refused") {
+							// 尝试重连
+							if reconnectErr := reconnect(); reconnectErr != nil {
+								if attempt == rpcMaxAttempts {
+									atomic.AddUint64(&failCount, 1)
+									log.Printf("[任务 %d] gRPC 调用失败且重连失败（第 %d/%d 次）: %v (重连错误: %v)", idx, attempt, rpcMaxAttempts, err, reconnectErr)
+								}
+							} else {
+								// 重连成功，继续重试
+								if attempt < rpcMaxAttempts {
+									continue
+								}
+							}
+						}
+						
 						if attempt == rpcMaxAttempts {
 							atomic.AddUint64(&failCount, 1)
 							log.Printf("[任务 %d] gRPC 调用失败（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, err)
