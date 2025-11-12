@@ -35,25 +35,26 @@ type KCPConfig struct {
 	RcvWnd      int
 }
 
-// DefaultKCPConfig 返回默认KCP配置
+// DefaultKCPConfig 返回默认KCP配置（高性能模式）
 func DefaultKCPConfig() *KCPConfig {
 	return &KCPConfig{
 		DataShard:    10,
 		ParityShard: 3,
-		NoDelay:      1,
-		Interval:     10,
-		Resend:       2,
-		NoCongestion: 1,
+		NoDelay:      1,      // 启用快速模式
+		Interval:     5,      // 降低到5ms，减少延迟（原10ms）
+		Resend:       2,      // 快速重传
+		NoCongestion: 1,      // 关闭流控，提高吞吐量
 		RxMinRto:     10,
-		MTU:          1350,
-		SndWnd:       1024,
-		RcvWnd:       1024,
+		MTU:          1400,   // 增加到1400，提高吞吐量（原1350）
+		SndWnd:       2048,   // 增加到2048，提高并发性能（原1024）
+		RcvWnd:       2048,   // 增加到2048，提高并发性能（原1024）
 	}
 }
 
 // kcpListener KCP监听器包装
 type kcpListener struct {
 	*kcp.Listener
+	config *KCPConfig // 保存配置以便在Accept时使用
 }
 
 // kcpConn KCP连接包装
@@ -80,7 +81,10 @@ func NewKCPListener(address string, config *KCPConfig) (net.Listener, error) {
 		return nil, err
 	}
 
-	return &kcpListener{Listener: listener}, nil
+	return &kcpListener{
+		Listener: listener,
+		config:   config, // 保存配置
+	}, nil
 }
 
 // Accept 接受连接并配置KCP参数
@@ -90,10 +94,16 @@ func (l *kcpListener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 
-	// 配置KCP会话参数（使用默认配置）
-	conn.SetNoDelay(1, 10, 2, 1)
-	conn.SetWindowSize(1024, 1024)
-	conn.SetMtu(1350)
+	// 使用保存的配置
+	config := l.config
+	if config == nil {
+		config = DefaultKCPConfig()
+	}
+	
+	// 配置KCP会话参数（使用配置中的参数）
+	conn.SetNoDelay(config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
+	conn.SetWindowSize(config.SndWnd, config.RcvWnd)
+	conn.SetMtu(config.MTU)
 	conn.SetReadBuffer(4194304)  // 4MB
 	conn.SetWriteBuffer(4194304) // 4MB
 
