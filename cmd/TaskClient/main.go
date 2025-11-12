@@ -69,6 +69,11 @@ func main() {
 		log.Fatalf("连接任务服务失败: %v", err)
 	}
 	log.Printf("已连接到服务器（%s传输）: %s", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress)
+
+	// 检查连接状态
+	connState := conn.GetState()
+	log.Printf("连接状态: %v", connState)
+
 	defer func() { _ = conn.Close() }()
 
 	client = taskapi.NewTaskServiceClient(conn)
@@ -117,12 +122,13 @@ func main() {
 		client = taskapi.NewTaskServiceClient(conn)
 		reconnectCount++
 
-		connMutex.Unlock()
-
-		// 只在重连次数较少时打印日志，避免日志过多
+		// 检查新连接状态
+		newConnState := conn.GetState()
 		if reconnectCount <= 3 || reconnectCount%10 == 0 {
-			log.Printf("已重新连接到服务器（%s传输）: %s (重连次数: %d)", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress, reconnectCount)
+			log.Printf("已重新连接到服务器（%s传输）: %s (重连次数: %d, 连接状态: %v)", map[bool]string{true: "KCP", false: "TCP"}[useKCP], serverAddress, reconnectCount, newConnState)
 		}
+
+		connMutex.Unlock()
 
 		// 重连后等待一段时间，确保连接稳定
 		time.Sleep(100 * time.Millisecond)
@@ -180,17 +186,38 @@ func main() {
 						log.Printf("[任务 %d] 准备发送请求（第 %d/%d 次）", idx, attempt, rpcMaxAttempts)
 					}
 
-					resp, err := currentClient.Execute(ctx, &taskapi.TaskRequest{
-						ClientID: id,
-						Path:     requestPath,
-					})
-					cancel()
+					// 使用 goroutine 监控请求是否超时
+					done := make(chan bool, 1)
+					var resp *taskapi.TaskResponse
+					var err error
+
+					go func() {
+						resp, err = currentClient.Execute(ctx, &taskapi.TaskRequest{
+							ClientID: id,
+							Path:     requestPath,
+						})
+						done <- true
+					}()
+
+					// 等待请求完成或超时
+					select {
+					case <-done:
+						// 请求完成
+						cancel()
+					case <-ctx.Done():
+						// 请求超时
+						err = ctx.Err()
+						cancel()
+						if idx < 5 {
+							log.Printf("[任务 %d] 请求超时（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, err)
+						}
+					}
 
 					// 调试日志：记录请求结果
 					if idx < 5 || idx%1000 == 0 {
 						if err != nil {
 							log.Printf("[任务 %d] 请求失败（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, err)
-						} else {
+						} else if resp != nil {
 							log.Printf("[任务 %d] 请求成功（第 %d/%d 次）: status=%d", idx, attempt, rpcMaxAttempts, resp.StatusCode)
 						}
 					}
