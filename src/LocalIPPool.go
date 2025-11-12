@@ -21,6 +21,8 @@ type IPPool interface { // 定义IPPool接口
 	GetIP() net.IP // 获取一个IP地址的方法
 	// ReleaseIP 释放一个IPv6地址（删除并创建新的），仅对IPv6地址有效
 	ReleaseIP(ip net.IP) // 释放IP地址的方法
+	// MarkIPUnused 标记IPv6地址为未使用（不立即删除，等待定期清理）
+	MarkIPUnused(ip net.IP) // 标记IP地址为未使用方法
 	// SetTargetIPCount 设置目标IP数量（用于IPv6地址池动态调整）
 	SetTargetIPCount(count int) // 设置目标IP数量方法
 	// Closer io.Closer 接口的实现，允许使用 defer pool.Close() 的方式优雅关闭。
@@ -61,6 +63,9 @@ type LocalIPPool struct { // 定义LocalIPPool结构体，实现IPPool接口
 	minActiveAddrs int // 最小活跃地址数
 	// maxActiveAddrs 最大活跃地址数量
 	maxActiveAddrs int // 最大活跃地址数
+	// lastCleanupTime 上次清理时间
+	lastCleanupTime time.Time // 上次清理时间
+	cleanupMutex    sync.Mutex // 保护清理时间的互斥锁
 }
 
 // NewLocalIPPool 创建并初始化一个智能IP池。
@@ -729,6 +734,25 @@ func (p *LocalIPPool) ReleaseIP(ip net.IP) {
 	p.activeIPv6Mutex.Unlock()
 }
 
+// MarkIPUnused 标记IPv6地址为未使用（不立即删除，等待定期清理）
+func (p *LocalIPPool) MarkIPUnused(ip net.IP) {
+	if ip == nil {
+		return
+	}
+
+	// 只处理IPv6地址
+	if ip.To4() != nil {
+		return // IPv4地址不需要标记
+	}
+
+	ipStr := ip.String()
+
+	// 从正在使用的地址映射中移除，但不删除地址
+	p.usedIPv6Mutex.Lock()
+	delete(p.usedIPv6Addrs, ipStr)
+	p.usedIPv6Mutex.Unlock()
+}
+
 // cleanupOldIPv6Addresses 清理子网下的所有旧IPv6地址（启动时调用）
 func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 	p.mu.RLock()
@@ -789,15 +813,19 @@ func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 
 // manageIPv6Addresses 后台管理IPv6地址的热加载（动态创建和删除）
 func (p *LocalIPPool) manageIPv6Addresses() {
-	ticker := time.NewTicker(30 * time.Second) // 每30秒检查一次
-	defer ticker.Stop()
+	adjustTicker := time.NewTicker(30 * time.Second)  // 每30秒检查一次地址池大小
+	cleanupTicker := time.NewTicker(20 * time.Minute)  // 每20分钟清理一次未使用的地址
+	defer adjustTicker.Stop()
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
 		case <-p.stopChan:
 			return
-		case <-ticker.C:
-			p.adjustIPv6AddressPool()
+		case <-adjustTicker.C:
+			p.adjustIPv6AddressPool() // 调整地址池大小（只创建，不删除）
+		case <-cleanupTicker.C:
+			p.cleanupUnusedIPv6Addresses() // 每20分钟清理一次未使用的地址
 		}
 	}
 }
@@ -826,19 +854,12 @@ func (p *LocalIPPool) adjustIPv6AddressPool() {
 	activeCount := len(p.activeIPv6Addrs)
 	p.activeIPv6Mutex.RUnlock()
 
-	// 统计正在使用的地址数量
-	p.usedIPv6Mutex.RLock()
-	usedCount := len(p.usedIPv6Addrs)
-	p.usedIPv6Mutex.RUnlock()
-
 	// 如果目标IP数量未设置，跳过调整
 	if minActive == 0 || maxActive == 0 {
 		return
 	}
 
-	// 计算需要调整的数量
-	availableCount := activeCount - usedCount
-
+	// 只负责创建地址，不在这里删除（删除由cleanupUnusedIPv6Addresses负责）
 	// 如果活跃地址太少，批量创建新地址
 	if activeCount < minActive {
 		needed := minActive - activeCount
@@ -846,15 +867,6 @@ func (p *LocalIPPool) adjustIPv6AddressPool() {
 			needed = batchSize
 		}
 		p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
-	}
-
-	// 如果活跃地址太多且可用地址充足，批量删除多余的地址
-	if activeCount > maxActive && availableCount > batchSize {
-		excess := activeCount - maxActive
-		if excess > batchSize {
-			excess = batchSize
-		}
-		p.batchDeleteIPv6Addresses(excess, interfaceName)
 	}
 }
 
@@ -904,29 +916,10 @@ func (p *LocalIPPool) batchCreateIPv6Addresses(count int, subnet *net.IPNet, int
 	}
 }
 
-// batchDeleteIPv6Addresses 批量删除IPv6地址（删除未使用的地址）
-func (p *LocalIPPool) batchDeleteIPv6Addresses(count int, interfaceName string) {
-	p.activeIPv6Mutex.RLock()
-	p.usedIPv6Mutex.RLock()
-
-	// 找出未使用的地址
-	unusedAddrs := make([]string, 0)
-	for addr := range p.activeIPv6Addrs {
-		if !p.usedIPv6Addrs[addr] {
-			unusedAddrs = append(unusedAddrs, addr)
-		}
-	}
-
-	p.usedIPv6Mutex.RUnlock()
-	p.activeIPv6Mutex.RUnlock()
-
-	// 限制删除数量
-	if len(unusedAddrs) > count {
-		unusedAddrs = unusedAddrs[:count]
-	}
-
+// batchDeleteIPv6Addresses 批量删除IPv6地址（删除指定的地址列表）
+func (p *LocalIPPool) batchDeleteIPv6Addresses(count int, interfaceName string, addrsToDelete []string) {
 	deleted := 0
-	for _, ipStr := range unusedAddrs {
+	for _, ipStr := range addrsToDelete {
 		// 删除地址
 		cmd := exec.Command("ip", "addr", "del", ipStr+"/128", "dev", interfaceName)
 		if err := cmd.Run(); err != nil {
@@ -986,4 +979,77 @@ func (p *LocalIPPool) SetTargetIPCount(count int) {
 	}
 
 	fmt.Printf("[IP池] 已设置目标IP数量: %d，最小活跃地址: %d，最大活跃地址: %d\n", count, count, count*2)
+}
+
+// cleanupUnusedIPv6Addresses 每20分钟清理一次未使用的IPv6地址
+func (p *LocalIPPool) cleanupUnusedIPv6Addresses() {
+	p.cleanupMutex.Lock()
+	now := time.Now()
+	// 如果距离上次清理不足20分钟，跳过
+	if !p.lastCleanupTime.IsZero() && now.Sub(p.lastCleanupTime) < 20*time.Minute {
+		p.cleanupMutex.Unlock()
+		return
+	}
+	p.lastCleanupTime = now
+	p.cleanupMutex.Unlock()
+
+	p.mu.RLock()
+	hasSupport := p.hasIPv6Support
+	interfaceName := p.ipv6Interface
+	maxActive := p.maxActiveAddrs
+	p.mu.RUnlock()
+
+	if !hasSupport {
+		return
+	}
+
+	if interfaceName == "" {
+		interfaceName = "ipv6net"
+	}
+
+	// 统计当前活跃地址数量和找出未使用的地址
+	p.activeIPv6Mutex.RLock()
+	p.usedIPv6Mutex.RLock()
+
+	activeCount := len(p.activeIPv6Addrs)
+	
+	// 找出未使用的地址
+	unusedAddrs := make([]string, 0)
+	for addr := range p.activeIPv6Addrs {
+		if !p.usedIPv6Addrs[addr] {
+			unusedAddrs = append(unusedAddrs, addr)
+		}
+	}
+
+	p.usedIPv6Mutex.RUnlock()
+	p.activeIPv6Mutex.RUnlock()
+
+	// 如果活跃地址超过最大值，删除多余的未使用地址
+	if maxActive > 0 && activeCount > maxActive && len(unusedAddrs) > 0 {
+		excess := activeCount - maxActive
+		if excess > len(unusedAddrs) {
+			excess = len(unusedAddrs)
+		}
+		// 只删除多余的未使用地址
+		p.batchDeleteIPv6Addresses(excess, interfaceName, unusedAddrs[:excess])
+		fmt.Printf("[IP池] 定期清理: 删除了 %d 个未使用的IPv6地址（20分钟周期）\n", excess)
+	} else if len(unusedAddrs) > 0 {
+		// 即使没有超过最大值，也清理一些长期未使用的地址（保留足够的缓冲）
+		// 保留至少 minActive 个地址，删除多余的未使用地址
+		p.mu.RLock()
+		minActive := p.minActiveAddrs
+		p.mu.RUnlock()
+		
+		if minActive > 0 && activeCount > minActive {
+			// 删除超出最小值的未使用地址的一半（避免一次性删除太多）
+			toDelete := (activeCount - minActive) / 2
+			if toDelete > len(unusedAddrs) {
+				toDelete = len(unusedAddrs)
+			}
+			if toDelete > 0 {
+				p.batchDeleteIPv6Addresses(toDelete, interfaceName, unusedAddrs[:toDelete])
+				fmt.Printf("[IP池] 定期清理: 删除了 %d 个未使用的IPv6地址（20分钟周期，保持最小活跃数）\n", toDelete)
+			}
+		}
+	}
 }
