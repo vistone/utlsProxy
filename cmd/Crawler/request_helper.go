@@ -53,5 +53,7 @@ func (c *Crawler) performRequestAttempt(workerID, taskID, attempt int, targetIP,
 	}
 	c.recordSlowIP(targetIP, duration)
 
+	// 注意：resp.Body会在调用者使用完后立即释放
+	// 调用者负责在复制body后释放resp.Body
 	return resp, resp.LocalIP, nil, duration
 }

@@ -143,9 +143,15 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 	}
 
+	// 限制响应体大小，防止超大响应体导致内存耗尽（最大50MB）
+	const maxResponseBodySize = 50 * 1024 * 1024 // 50MB
+	if bodyLen > maxResponseBodySize {
+		log.Printf("[gRPC] 警告: 响应体过大 (%d 字节)，超过限制 (%d 字节)，将被截断", bodyLen, maxResponseBodySize)
+		body = body[:maxResponseBodySize]
+		bodyLen = maxResponseBodySize
+	}
+	
 	// 将body赋值给resp.Body
-	// 注意：resp.Body会在gRPC响应发送完成后由gRPC框架自动释放
-	// body是handleTaskRequest返回的副本，原始响应体已在handleTaskRequest中释放
 	resp.Body = body
 	// 记录gRPC响应大小（响应体）
 	responseSize := int64(bodyLen)
@@ -161,8 +167,21 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
 	}
 	
+	// 使用goroutine在响应发送后清理内存
+	// 注意：gRPC响应发送是异步的，我们在延迟后清理可以确保响应已发送
+	// 使用goroutine异步清理，避免阻塞响应返回
+	go func(r *taskapi.TaskResponse) {
+		// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，200ms足够）
+		time.Sleep(200 * time.Millisecond)
+		// 清理resp.Body，帮助GC回收内存
+		// 此时gRPC框架应该已经将响应数据复制到发送缓冲区，可以安全清理
+		if r != nil {
+			r.Body = nil
+		}
+	}(resp)
+	
 	// body是局部变量，函数返回后会自动回收
-	// resp.Body会在gRPC响应发送完成后由gRPC框架自动释放
+	// resp.Body会在goroutine中延迟清理，避免内存累积
 	return resp, nil
 }
 
