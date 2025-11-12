@@ -105,6 +105,13 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	}
 	atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
 	
+	// 调试日志：确认响应体已正确设置
+	if len(body) > 0 {
+		log.Printf("[gRPC] 响应已准备: client_id=%s, status=%d, body_len=%d", req.ClientID, statusCode, len(body))
+	} else {
+		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
+	}
+	
 	return resp, nil
 }
 

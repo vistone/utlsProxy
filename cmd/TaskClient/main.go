@@ -13,10 +13,10 @@ import (
 
 func main() {
 	const (
-		serverAddress   = "127.0.0.1:9091"
-		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3143!2u1003"
+		serverAddress   = "172.93.47.57:9091"
+		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3142!2u1003"
 		defaultClientID = "1"
-		repeatCount     = 5000
+		repeatCount     = 10000
 		concurrency     = 500
 		requestTimeout  = 10 * time.Second
 		rpcMaxAttempts  = 5
@@ -100,7 +100,22 @@ func main() {
 					}
 
 					atomic.AddUint64(&successCount, 1)
-					log.Printf("[任务 %d] 成功（第 %d/%d 次）: client_id=%s status=%d body_len=%d", idx, attempt, rpcMaxAttempts, resp.ClientID, resp.StatusCode, len(resp.Body))
+					bodyLen := len(resp.Body)
+					bodyPreview := ""
+					if bodyLen > 0 {
+						// 显示响应体的前100个字节（十六进制）
+						previewLen := bodyLen
+						if previewLen > 100 {
+							previewLen = 100
+						}
+						bodyPreview = fmt.Sprintf(", body_preview=%x", resp.Body[:previewLen])
+						if bodyLen > 100 {
+							bodyPreview += "..."
+						}
+					} else {
+						bodyPreview = ", body_preview=(空)"
+					}
+					log.Printf("[任务 %d] 成功（第 %d/%d 次）: client_id=%s status=%d body_len=%d%s", idx, attempt, rpcMaxAttempts, resp.ClientID, resp.StatusCode, bodyLen, bodyPreview)
 					success = true
 					break
 				}
