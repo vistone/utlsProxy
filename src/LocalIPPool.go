@@ -1031,8 +1031,9 @@ func (p *LocalIPPool) SetTargetIPCount(count int) {
 		// 如果当前活跃地址不足，立即批量创建到目标数量
 		if activeCount < count {
 			needed := count - activeCount
+			// 一次性创建所有需要的地址，确保与RemoteDomainIPPool完全对等
 			p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
-			fmt.Printf("[IP池] 已创建 %d 个IPv6地址，与目标IP数量对等（总数: %d）\n", needed, count)
+			fmt.Printf("[IP池] 已创建 %d 个IPv6地址，与目标IP数量对等（总数: %d，RemoteDomainIPPool: %d）\n", needed, count, count)
 		} else if activeCount > count {
 			// 如果当前活跃地址超过目标值，删除多余的未使用地址
 			p.activeIPv6Mutex.RLock()

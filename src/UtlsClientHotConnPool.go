@@ -638,9 +638,11 @@ func (p *domainConnPool) refreshTargetIPList() {
 	p.targetIPv6List = newIPv6
 	p.knownTargetIPs = newKnown
 	
-	// 更新IPv6地址池的目标IP数量（与目标IPv6地址数量保持一致）
+	// 更新IPv6地址池的目标IP数量（与RemoteDomainIPPool的IP数量对等）
 	totalTargetIPs := len(newIPv6) + len(newIPv4)
 	if p.localIPv6Pool != nil && totalTargetIPs > 0 {
+		fmt.Printf("[连接池] 域名 [%s]: RemoteDomainIPPool有 %d 个IP（IPv4: %d, IPv6: %d），设置IPv6地址池大小为 %d\n", 
+			p.domain, totalTargetIPs, len(newIPv4), len(newIPv6), totalTargetIPs)
 		p.localIPv6Pool.SetTargetIPCount(totalTargetIPs)
 	}
 	
