@@ -198,7 +198,16 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 	p.mu.RLock()                // 加读锁
 	hasIPv6 := p.hasIPv6Support // 获取IPv6支持标志
 	ipv6Queue := p.ipv6Queue    // 获取IPv6队列引用
+	minActive := p.minActiveAddrs // 获取最小活跃地址数
 	p.mu.RUnlock()              // 解读锁
+	
+	// 如果minActiveAddrs未设置，说明SetTargetIPCount还没有被调用，不应该创建地址
+	if hasIPv6 && minActive == 0 {
+		// 等待SetTargetIPCount被调用
+		time.Sleep(100 * time.Millisecond)
+		// 递归调用，等待地址池初始化完成
+		return p.GetIP()
+	}
 
 	if hasIPv6 { // 如果支持IPv6
 		// 如果IPv6队列为nil，说明是隧道模式，返回nil表示不绑定本地IP
@@ -259,19 +268,52 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 			currentMinActive := p.minActiveAddrs
 			p.mu.RUnlock()
 			
-			// 如果地址池已达到目标数量，不应该创建新地址，应该等待复用
-			if currentMinActive > 0 && currentActiveCount >= currentMinActive {
-				// 地址池已满，等待一段时间后重试复用
-				time.Sleep(100 * time.Millisecond)
-				return p.GetIP()
+		// 如果地址池已达到目标数量，不应该创建新地址，应该等待复用
+		if currentMinActive > 0 && currentActiveCount >= currentMinActive {
+			// 地址池已满，等待一段时间后重试复用
+			// 将地址放回队列（虽然不应该发生，但为了安全）
+			select {
+			case p.ipv6Queue <- ip:
+			default:
 			}
-			
-			// 地址池未满，创建新地址
-			p.ensureIPv6AddressCreated(ip)
-			// 标记地址为正在使用
-			p.usedIPv6Mutex.Lock()
-			p.usedIPv6Addrs[ip.String()] = true
-			p.usedIPv6Mutex.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			return p.GetIP()
+		}
+		
+		// 地址池未满，创建新地址（但这种情况不应该发生，因为应该在前面就检查了）
+		if currentMinActive == 0 {
+			// minActiveAddrs 未设置，说明 SetTargetIPCount 还没有被调用
+			// 这种情况下不应该创建地址，应该等待 SetTargetIPCount 被调用
+			fmt.Printf("[IP池] 警告: minActiveAddrs未设置，等待SetTargetIPCount被调用，跳过创建地址\n")
+			select {
+			case p.ipv6Queue <- ip:
+			default:
+			}
+			time.Sleep(500 * time.Millisecond)
+			return p.GetIP()
+		}
+		
+		// 地址池未满，创建新地址
+		// 注意：只有在地址池未达到目标数量时才创建，否则应该等待复用
+		ipStr := ip.String()
+		p.ensureIPv6AddressCreated(ip)
+		
+		// 检查地址是否成功创建并添加到活跃地址列表
+		p.activeIPv6Mutex.RLock()
+		isActive := p.activeIPv6Addrs[ipStr]
+		p.activeIPv6Mutex.RUnlock()
+		
+		if !isActive {
+			// 地址创建失败或未添加到活跃列表，不应该使用
+			fmt.Printf("[IP池] 警告: IPv6地址 %s 创建后未添加到活跃列表，跳过使用\n", ipStr)
+			// 递归调用，尝试获取其他地址
+			return p.GetIP()
+		}
+		
+		// 标记地址为正在使用
+		p.usedIPv6Mutex.Lock()
+		p.usedIPv6Addrs[ipStr] = true
+		p.usedIPv6Mutex.Unlock()
 		}
 		
 		return ip
