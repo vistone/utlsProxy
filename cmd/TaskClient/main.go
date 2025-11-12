@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -107,9 +108,40 @@ func main() {
 					}
 
 					atomic.AddUint64(&successCount, 1)
-					bodyLen := len(resp.Body)
 					
-					if bodyLen > 0 {
+					// 优先使用文件路径，避免大响应体占用内存
+					var bodyLen int
+					if resp.FilePath != "" {
+						// 服务器端已经将响应体写入文件，直接复制文件
+						filename := fmt.Sprintf("task_%d_%d_%d.gz", idx, attempt, time.Now().UnixNano())
+						destPath := filepath.Join(outputDir, filename)
+						
+						// 直接复制文件，避免读取到内存
+						srcFile, err := os.Open(resp.FilePath)
+						if err != nil {
+							log.Printf("[任务 %d] 警告: 打开临时文件失败: %v", idx, err)
+						} else {
+							destFile, err := os.Create(destPath)
+							if err != nil {
+								log.Printf("[任务 %d] 警告: 创建目标文件失败: %v", idx, err)
+								srcFile.Close()
+							} else {
+								// 使用io.Copy直接复制文件，避免全部加载到内存
+								written, err := io.Copy(destFile, srcFile)
+								srcFile.Close()
+								destFile.Close()
+								if err != nil {
+									log.Printf("[任务 %d] 警告: 复制文件失败: %v", idx, err)
+								} else {
+									bodyLen = int(written)
+									// 删除服务器端的临时文件
+									os.Remove(resp.FilePath)
+								}
+							}
+						}
+					} else if len(resp.Body) > 0 {
+						// 小响应体使用内存传输
+						bodyLen = len(resp.Body)
 						// 保存响应体到文件（gzip格式）
 						filename := fmt.Sprintf("task_%d_%d_%d.gz", idx, attempt, time.Now().UnixNano())
 						filePath := filepath.Join(outputDir, filename)
@@ -117,18 +149,16 @@ func main() {
 							// 只在保存失败时记录日志
 							log.Printf("[任务 %d] 警告: 保存响应体到文件失败: %v", idx, err)
 						}
-						// 成功保存不记录日志，减少日志输出和内存占用
-
 						// 立即释放响应体内存，避免内存累积
 						resp.Body = nil
 					}
-					
+
 					// 采样日志：每1000次成功记录一次，减少日志输出和内存占用
 					successCountValue := atomic.LoadUint64(&successCount)
 					if successCountValue%1000 == 0 {
 						log.Printf("[任务 %d] 成功（第 %d/%d 次）: client_id=%s status=%d body_len=%d", idx, attempt, rpcMaxAttempts, resp.ClientID, resp.StatusCode, bodyLen)
 					}
-					
+
 					success = true
 					break
 				}

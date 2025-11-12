@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -151,16 +153,42 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		atomic.AddInt64(&s.crawler.stats.GRPCFailed, 1)
 	}
 
-	// 限制响应体大小，防止超大响应体导致内存耗尽（最大50MB）
+	// 大响应体阈值：超过1MB的响应体直接写入文件，避免占用内存
+	const largeBodyThreshold = 1 * 1024 * 1024 // 1MB
 	const maxResponseBodySize = 50 * 1024 * 1024 // 50MB
+	
 	if bodyLen > maxResponseBodySize {
 		log.Printf("[gRPC] 警告: 响应体过大 (%d 字节)，超过限制 (%d 字节)，将被截断", bodyLen, maxResponseBodySize)
 		body = body[:maxResponseBodySize]
 		bodyLen = maxResponseBodySize
 	}
 	
-	// 将body赋值给resp.Body
-	resp.Body = body
+	// 如果响应体较大，直接写入临时文件，避免占用内存
+	if bodyLen > largeBodyThreshold {
+		tempFile := filepath.Join(s.crawler.tempFileDir, fmt.Sprintf("resp_%s_%d_%d.tmp", req.ClientID, time.Now().UnixNano(), bodyLen))
+		if err := os.WriteFile(tempFile, body, 0644); err != nil {
+			log.Printf("[gRPC] 警告: 写入临时文件失败: %v，将使用内存传输", err)
+			// 写入失败，回退到内存传输
+			resp.Body = body
+		} else {
+			// 写入成功，设置文件路径，清空body
+			resp.FilePath = tempFile
+			resp.Body = nil // 清空body，释放内存
+			body = nil
+			bodyLen = 0 // 文件大小通过FilePath传递
+			
+			// 使用goroutine在响应发送后清理临时文件
+			go func(filePath string) {
+				time.Sleep(5 * time.Minute) // 等待5分钟后清理临时文件
+				if err := os.Remove(filePath); err != nil {
+					log.Printf("[gRPC] 警告: 清理临时文件失败: %v", err)
+				}
+			}(tempFile)
+		}
+	} else {
+		// 小响应体直接使用内存传输
+		resp.Body = body
+	}
 	// 记录gRPC响应大小（响应体）
 	responseSize := int64(bodyLen)
 	if resp.ErrorMessage != "" {

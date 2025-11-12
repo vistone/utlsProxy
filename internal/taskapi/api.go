@@ -35,6 +35,7 @@ type TaskResponse struct {
 	StatusCode   int32  `json:"status_code"`
 	Body         []byte `json:"body"`
 	ErrorMessage string `json:"error_message,omitempty"`
+	FilePath     string `json:"file_path,omitempty"` // 大响应体的文件路径，如果设置则优先使用文件而不是body
 }
 
 type TaskServiceServer interface {

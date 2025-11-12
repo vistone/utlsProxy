@@ -40,6 +40,7 @@ type Crawler struct {
 	ipSelector      uint64
 	grpcServer      *grpc.Server
 	grpcListener    net.Listener
+	tempFileDir     string // 临时文件目录，用于存储大响应体
 }
 
 const maxTaskDuration = 15 * time.Second // 增加超时时间到15秒，以应对慢速IP
@@ -171,6 +172,12 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 		grpcConcurrency = 500 // 默认500并发
 	}
 	
+	// 创建临时文件目录用于存储大响应体
+	tempFileDir := filepath.Join(dataDir, "grpc_temp")
+	if err := os.MkdirAll(tempFileDir, 0755); err != nil {
+		return nil, fmt.Errorf("创建临时文件目录失败: %w", err)
+	}
+	
 	crawler := &Crawler{
 		pool:            pool,
 		client:          client,
@@ -184,6 +191,7 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 		concurrency:    cfg.PoolConfig.Concurrency,
 		grpcSemaphore:  make(chan struct{}, grpcConcurrency), // 创建信号量，限制gRPC并发数
 		dataDir:        dataDir,
+		tempFileDir:    tempFileDir,
 		stopped:        0,
 		fingerprint:    fingerprint,
 		slowIPTracker:  NewSlowIPTracker(4 * time.Second),
@@ -191,6 +199,7 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 	}
 	
 	log.Printf("[并发控制] gRPC服务器最大并发数设置为: %d", grpcConcurrency)
+	log.Printf("[内存优化] 临时文件目录: %s", tempFileDir)
 
 	return crawler, nil
 }
