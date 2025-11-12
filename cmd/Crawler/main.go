@@ -41,7 +41,7 @@ type Crawler struct {
 	grpcListener    net.Listener
 }
 
-const maxTaskDuration = 2 * time.Second
+const maxTaskDuration = 15 * time.Second // 增加超时时间到15秒，以应对慢速IP
 
 // CrawlerStats 爬虫统计信息
 type CrawlerStats struct {

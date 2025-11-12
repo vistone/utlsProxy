@@ -16,11 +16,11 @@ import (
 func main() {
 	const (
 		serverAddress   = "172.93.47.57:9091"
-		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3142!2u1003"
+		requestPath     = "/rt/earth/BulkMetadata/pb=!1m2!1s3143!2u1003"
 		defaultClientID = "1"
-		repeatCount     = 10000
+		repeatCount     = 20000
 		concurrency     = 500
-		requestTimeout  = 10 * time.Second
+		requestTimeout  = 20 * time.Second // 增加超时时间以应对慢速IP
 		rpcMaxAttempts  = 5
 		rpcRetryDelay   = 50 * time.Millisecond
 		outputDir       = "./taskclient_data" // 响应体保存目录
