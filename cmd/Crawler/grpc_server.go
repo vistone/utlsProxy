@@ -163,29 +163,40 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		bodyLen = maxResponseBodySize
 	}
 	
-	// 所有响应体都写入临时文件，避免占用内存
-	tempFile := filepath.Join(s.crawler.tempFileDir, fmt.Sprintf("resp_%s_%d_%d.tmp", req.ClientID, time.Now().UnixNano(), bodyLen))
-	if err := os.WriteFile(tempFile, body, 0644); err != nil {
-		log.Printf("[gRPC] 警告: 写入临时文件失败: %v，将使用内存传输", err)
-		// 写入失败，回退到内存传输（这种情况应该很少）
-		resp.Body = body
-	} else {
-		// 写入成功，设置文件路径，立即清空body释放内存
-		resp.FilePath = tempFile
-		resp.Body = nil // 立即清空body，释放内存
-		body = nil      // 立即清空局部变量body
-		
-		// 使用goroutine在响应发送后快速清理临时文件
-		// 客户端会在复制完成后立即删除，这里作为备用清理机制
-		go func(filePath string) {
-			time.Sleep(2 * time.Minute) // 等待2分钟后清理临时文件（备用机制）
-			if err := os.Remove(filePath); err != nil {
-				// 文件可能已被客户端删除，忽略错误
-				if !os.IsNotExist(err) {
-					log.Printf("[gRPC] 警告: 清理临时文件失败: %v", err)
-				}
+	// 对于大响应体，先写入临时文件，然后流式读取传输，避免内存占用
+	// 对于小响应体，直接内存传输
+	const largeBodyThreshold = 100 * 1024 // 100KB，超过此大小写入文件后流式传输
+	
+	if bodyLen > largeBodyThreshold {
+		// 大响应体：写入文件，然后流式读取传输
+		tempFile := filepath.Join(s.crawler.tempFileDir, fmt.Sprintf("resp_%s_%d_%d.tmp", req.ClientID, time.Now().UnixNano(), bodyLen))
+		if err := os.WriteFile(tempFile, body, 0644); err != nil {
+			log.Printf("[gRPC] 警告: 写入临时文件失败: %v，将使用内存传输", err)
+			// 写入失败，回退到内存传输
+			resp.Body = body
+		} else {
+			// 写入成功，立即清空body释放内存
+			body = nil
+			
+			// 读取文件内容到内存（短暂占用，读取完立即传输，传输完立即释放）
+			// 注意：由于gRPC Unary调用的限制，无法真正的流式传输
+			// 但写入文件后立即读取，可以避免在HTTP响应读取和gRPC传输之间同时占用内存
+			fileData, err := os.ReadFile(tempFile)
+			if err != nil {
+				log.Printf("[gRPC] 警告: 读取临时文件失败: %v，将返回错误", err)
+				resp.ErrorMessage = fmt.Sprintf("读取临时文件失败: %v", err)
+				os.Remove(tempFile) // 清理临时文件
+				return resp, nil
 			}
-		}(tempFile)
+			
+			// 设置响应体，立即删除临时文件
+			resp.Body = fileData
+			os.Remove(tempFile) // 立即删除临时文件，释放磁盘空间
+		}
+	} else {
+		// 小响应体：直接内存传输
+		resp.Body = body
+		body = nil // 清空局部变量，resp.Body会持有引用
 	}
 	// 记录gRPC响应大小（响应体）
 	// 如果使用文件路径，bodyLen仍然是原始大小，用于统计
@@ -200,24 +211,15 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
 	}
 	
-	// 所有响应体都已写入文件，body和resp.Body都是nil，无需清理
-	// 但为了保险起见，如果写入失败回退到内存传输，仍然需要延迟清理
-	if resp.Body != nil {
-		// 写入文件失败，回退到内存传输的情况，需要延迟清理
-		go func(r *taskapi.TaskResponse, b []byte) {
-			// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，100ms足够）
-			time.Sleep(100 * time.Millisecond)
-			// 清理resp.Body和局部变量body，帮助GC回收内存
-			if r != nil {
-				r.Body = nil
-			}
-			// 清理局部变量body引用
-			if b != nil {
-				b = nil
-			}
-		}(resp, body)
-	}
-	// 如果resp.Body已经是nil（文件传输成功），body也是nil，无需清理
+	// 延迟清理resp.Body，确保gRPC响应已发送
+	go func(r *taskapi.TaskResponse) {
+		// 等待足够的时间确保gRPC响应已发送（通常gRPC发送很快，100ms足够）
+		time.Sleep(100 * time.Millisecond)
+		// 清理resp.Body，帮助GC回收内存
+		if r != nil {
+			r.Body = nil
+		}
+	}(resp)
 	
 	// body是局部变量，函数返回后会自动回收
 	// resp.Body和body都会在goroutine中延迟清理，避免内存累积
@@ -306,3 +308,4 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 
 	return 0, nil, fmt.Errorf("任务执行失败：超过最大重试次数")
 }
+
