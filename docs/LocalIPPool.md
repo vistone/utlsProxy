@@ -37,7 +37,38 @@ import "path/to/your/src"
 
 ### 2. 初始化IP池
 
-使用 `NewLocalIPPool` 函数创建实例。**注意：变量应声明为 `src.IPPool` 接口类型。**
+**推荐方式：使用统一配置文件**
+
+项目现在支持通过 `config/config.toml` 统一管理本地IP池配置：
+
+```go
+import (
+    "log"
+    "utlsProxy/config"
+    "utlsProxy/src"
+)
+
+// 加载配置
+cfg, err := config.LoadConfig("./config/config.toml")
+if err != nil {
+    log.Fatalf("加载配置失败: %v", err)
+}
+
+// 创建IP池（使用配置文件中的值）
+var ipPool src.IPPool // 关键：依赖于接口，而非具体实现
+ipPool, err = src.NewLocalIPPool(
+    cfg.HotConnPool.LocalIPv4Addresses,  // IPv4地址列表
+    cfg.HotConnPool.LocalIPv6SubnetCIDR, // IPv6子网CIDR
+)
+if err != nil {
+    log.Fatalf("无法初始化IP池: %v", err)
+}
+
+// IPv6队列大小由配置决定（默认100）
+// 如果需要自定义，可以在创建LocalIPPool后调整
+```
+
+**传统方式：手动指定参数**
 
 ```go
 var ipPool src.IPPool // 关键：依赖于接口，而非具体实现
@@ -56,6 +87,20 @@ if err != nil {
 // ipPool, err = src.NewLocalIPPool(ipv4s, ipv6Subnet)
 // 程序将输出: "未在当前网络环境中检测到指定的IPv6子网，已降级为仅IPv4模式。"
 ```
+
+**配置说明**
+
+在 `config/config.toml` 中的 `[HotConnPool]` 段包含本地IP池配置：
+
+```toml
+[HotConnPool]
+# 本地IP池配置
+LocalIPv4Addresses = ["192.168.1.100", "192.168.1.101"]  # IPv4地址列表（备用）
+LocalIPv6SubnetCIDR = "2607:8700:5500:2943::/64"         # IPv6子网CIDR（优先）
+IPv6QueueSize = 100                                       # IPv6地址队列缓冲区大小
+```
+
+详细配置说明请参考 [配置管理文档](./Config.md)。
 
 ### 3. 获取IP地址
 

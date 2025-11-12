@@ -1,0 +1,95 @@
+[ServerConfig]
+Version="v1.0.0"
+ServerPort=9091
+
+[DNSDomain]
+HostName=["kh.google.com","earth.google.com","khmdb.google.com"]
+StorageDir="./domain_ips"
+StorageFormat="json"
+UpdateIntervalMinutes=10 # 域名IP更新间隔（分钟）
+DNSServerFilePath="./src/DNSServerNames.json" # DNS服务器配置文件路径
+DefaultDNSServers=["8.8.8.8", "1.1.1.1"] # 默认DNS服务器列表（当配置文件不存在时使用）
+DNSQueryTimeoutSeconds=5 # DNS查询超时时间（秒）
+DNSMaxWorkers=50 # DNS并发查询工作线程数
+
+# HTTP客户端配置（用于IP信息查询）
+HTTPClientTimeoutSeconds=10 # HTTP客户端超时时间（秒）
+HTTPMaxIdleConns=100 # HTTP最大空闲连接数
+HTTPMaxIdleConnsPerHost=10 # 每个主机最大空闲连接数
+HTTPIdleConnTimeoutSeconds=90 # HTTP空闲连接超时时间（秒）
+
+[PoolConfig]
+ProxyAddress = "" # 你的代理地址
+Concurrency = 50
+RehabilitationIntervalMinutes = 20
+IdleTimeoutMinutes = 10 # 连接空闲10分钟后自动下线
+
+[IPInfo]
+Token="f6babc99a5ec26"
+
+# UTLS客户端配置
+[UTlsClient]
+ReadTimeoutSeconds=30 # 读取超时时间（秒）
+DialTimeoutSeconds=10 # 连接超时时间（秒）
+MaxRetries=0 # 最大重试次数（0表示不重试）
+
+# 热连接池配置
+[HotConnPool]
+# 本地IP池配置
+LocalIPv4Addresses = ["192.168.1.100", "192.168.1.101"] # 本地IPv4地址列表（备用）
+LocalIPv6SubnetCIDR = "2607:8700:5500:2943::/64" # 本地IPv6子网CIDR（优先，如果环境支持）
+IPv6QueueSize = 100 # IPv6地址队列缓冲区大小
+
+# 连接池基础配置
+Domain = "kh.google.com" # 目标域名
+Port = "443" # 目标端口
+MaxConns = 100 # 最大连接数
+IdleTimeoutMinutes = 5 # 连接空闲超时时间（分钟）
+
+# 预热配置
+# WarmupPath 和 WarmupHeaders 自动使用 RockTreeDataConfig 中的配置
+WarmupMethod = "GET" # 预热请求方法
+WarmupConcurrency = 10 # 预热并发数
+
+# 定时任务配置
+BlacklistTestIntervalMinutes = 5 # 黑名单IP测试间隔（分钟）
+IPRefreshIntervalMinutes = 10 # IP列表刷新间隔（分钟）
+
+# TLS指纹配置
+FingerprintName = "" # TLS指纹名称，留空则随机选择
+
+[RockTreeDataConfig]
+HostName="kh.google.com"
+CheckStatusPath="/rt/earth/PlanetoidMetadata"#这里是数据库的入口,包含数据的版本号，请求的大小是13个字节。这个地址也是建立热连接的地址。也是专门检查ip是否被封的检查口 如果返回403，则说明ip被封了
+BulkMetadataPath="/rt/earth/BulkMetadata/pb=!1m2!1s%s!2u%d"#这个是数据集合，是批量数据，所有的nodedata数据的详细信息都在这里。
+NodeDataPath="/rt/earth/NodeData/pb=!1m2!1s%s!2u%d!2e6!4b0"
+ImageryDataPath="/rt/earth/NodeData/pb=!1m2!1s%s!2u%d!2e1!3u%d!4b0"
+RocktreeRquestHeader=[
+    "Accept-Encoding: gzip, deflate, br, zstd",
+    "Accept: */*",
+    "Host:kh.google.com",
+    "Origin:https://earth.google.com",
+    "Referer:https://earth.google.com/",
+    "Sec-Fetch-Dest:empty",
+    "Sec-Fetch-Mode:cors",
+    "Sec-Fetch-Site:same-site",
+    "TE:trailers"
+]
+
+[EarthImageryDataConfig]
+HostName="kh.google.com"
+CheckStatusPath="/geauth" #这个是认证的入口，使用的是POST方法，需要发送密钥，获取session的主要接口，也是检测ip是否被封的接口 这个也是建立热连接的地址。如果返回403，则说明ip被封了
+dbrootPath="/dbRoot.v5"
+q2path="/flatfile?q2-%s-q.%d"
+imageryPath="/flatfile?f1-%s-i.%d"
+requestHeader=[
+    "Accept-Encoding: gzip, deflate, br, zstd",
+    "Accept: */*",
+    "Host:kh.google.com",
+    "Origin:https://kh.google.com",
+    "Referer:https://kh.google.com/",
+    "Sec-Fetch-Dest:empty",
+    "Sec-Fetch-Mode:cors",
+    "Sec-Fetch-Site:same-site",
+    "TE:trailers"
+]

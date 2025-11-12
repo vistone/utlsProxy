@@ -56,7 +56,9 @@
 
 ### 2. 初始化与配置
 
-在您的 `main.go` 中，您需要创建 `MonitorConfig`，并用它来初始化监视器。
+**推荐方式：使用统一配置文件**
+
+项目现在支持通过 `config/config.toml` 统一管理所有配置。推荐使用配置文件方式：
 
 ```go
 package main
@@ -67,50 +69,59 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
-	"path/to/your/src" // 确保路径正确
+	"utlsProxy/config"
+	"utlsProxy/src"
 )
 
 // DNSDatabaseConfig 用于解析DNSServerNames.json
 type DNSDatabaseConfig struct {
-	Servers map[string]string `json:"dns_servers"`
+	Servers map[string]string `json:"servers"`
 }
 
 func main() {
-	// 1. 从文件加载DNS服务器列表
-	dnsData, err := os.ReadFile("./src/DNSServerNames.json")
+	// 1. 加载统一配置文件
+	cfg, err := config.LoadConfig("./config/config.toml")
 	if err != nil {
-		log.Fatalf("无法读取 DNSServerNames.json: %v", err)
+		log.Fatalf("加载配置失败: %v", err)
 	}
-	var dnsDB DNSDatabaseConfig
-	if err := json.Unmarshal(dnsData, &dnsDB); err != nil {
-		log.Fatalf("解析 DNSServerNames.json 失败: %v", err)
-	}
-	
-	// 提取并去重DNS服务器IP
-	uniqueServers := make(map[string]bool)
+
+	// 2. 从配置文件加载DNS服务器列表
 	var dnsServers []string
-	for _, ip := range dnsDB.Servers {
-		if !uniqueServers[ip] {
-			uniqueServers[ip] = true
-			dnsServers = append(dnsServers, ip)
+	dnsData, err := os.ReadFile(cfg.DNSDomain.DNSServerFilePath)
+	if err != nil {
+		log.Printf("无法读取DNS服务器文件，使用默认DNS服务器")
+		dnsServers = cfg.DNSDomain.DefaultDNSServers
+	} else {
+		var dnsDB DNSDatabaseConfig
+		if err := json.Unmarshal(dnsData, &dnsDB); err != nil {
+			log.Printf("解析DNS服务器文件失败，使用默认DNS服务器")
+			dnsServers = cfg.DNSDomain.DefaultDNSServers
+		} else {
+			// 提取并去重DNS服务器IP
+			uniqueServers := make(map[string]bool)
+			for _, ip := range dnsDB.Servers {
+				if !uniqueServers[ip] {
+					uniqueServers[ip] = true
+					dnsServers = append(dnsServers, ip)
+				}
+			}
 		}
 	}
-	log.Printf("成功从数据库加载并去重后得到 %d 个DNS服务器。\n", len(dnsServers))
+	log.Printf("成功加载 %d 个DNS服务器。\n", len(dnsServers))
 
-	// 2. 创建配置
-	config := src.MonitorConfig{
-		Domains:        []string{"kh.google.com", "earth.google.com", "khmdb.google.com"},
+	// 3. 创建MonitorConfig（使用配置文件中的值）
+	monitorConfig := src.MonitorConfig{
+		Domains:        cfg.DNSDomain.HostName,
 		DNSServers:     dnsServers,
-		IPInfoToken:    "YOUR_IPINFO_TOKEN", // 替换为您的 ipinfo.io Token
-		UpdateInterval: 5 * time.Minute,
-		StorageDir:     "./domain_ips",      // 指定存储结果的目录
-		StorageFormat:  "json",              // 目前支持 "json", "yaml", "toml"
+		IPInfoToken:    cfg.IPInfo.Token,
+		UpdateInterval: cfg.DNSDomain.GetUpdateInterval(),
+		StorageDir:     cfg.DNSDomain.StorageDir,
+		StorageFormat:  cfg.DNSDomain.StorageFormat,
 	}
 
-	// 3. 初始化监视器，注意变量类型是接口
+	// 4. 初始化监视器，注意变量类型是接口
 	var monitor src.DomainMonitor
-	monitor, err = src.NewRemoteIPMonitor(config)
+	monitor, err = src.NewRemoteIPMonitor(monitorConfig)
 	if err != nil {
 		log.Fatalf("无法创建监视器: %v", err)
 	}
@@ -118,6 +129,43 @@ func main() {
 	// ... (见下一节)
 }
 ```
+
+**传统方式：硬编码配置**
+
+如果不想使用配置文件，也可以直接创建配置：
+
+```go
+config := src.MonitorConfig{
+	Domains:        []string{"kh.google.com", "earth.google.com", "khmdb.google.com"},
+	DNSServers:     dnsServers,
+	IPInfoToken:    "YOUR_IPINFO_TOKEN",
+	UpdateInterval: 10 * time.Minute,
+	StorageDir:     "./domain_ips",
+	StorageFormat:  "json",
+}
+```
+
+**配置文件说明**
+
+在 `config/config.toml` 中的 `[DNSDomain]` 段包含以下配置：
+
+```toml
+[DNSDomain]
+HostName=["kh.google.com","earth.google.com","khmdb.google.com"]
+StorageDir="./domain_ips"
+StorageFormat="json"
+UpdateIntervalMinutes=10
+DNSServerFilePath="./src/DNSServerNames.json"
+DefaultDNSServers=["8.8.8.8", "1.1.1.1"]
+DNSQueryTimeoutSeconds=5
+DNSMaxWorkers=50
+HTTPClientTimeoutSeconds=10
+HTTPMaxIdleConns=100
+HTTPMaxIdleConnsPerHost=10
+HTTPIdleConnTimeoutSeconds=90
+```
+
+详细配置说明请参考 [配置管理文档](./Config.md)。
 
 ### 3. 启动与停止服务
 
