@@ -228,10 +228,24 @@ func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 			}
 		}
 		
+		activeCount := len(p.activeIPv6Addrs)
 		p.usedIPv6Mutex.RUnlock()
 		p.activeIPv6Mutex.RUnlock()
 		
-		// 如果没有可复用的地址，从队列中获取一个新地址
+		// 检查地址池是否已达到目标数量
+		p.mu.RLock()
+		minActive := p.minActiveAddrs
+		p.mu.RUnlock()
+		
+		// 如果地址池已达到目标数量，等待地址空闲，而不是创建新地址
+		if minActive > 0 && activeCount >= minActive {
+			// 所有地址都在使用中，等待一段时间后重试
+			time.Sleep(100 * time.Millisecond)
+			// 递归调用，再次尝试获取可复用的地址
+			return p.GetIP()
+		}
+		
+		// 如果地址池未达到目标数量，才从队列中获取新地址并创建
 		// 如果队列为空，此操作会阻塞，直到后台生产者放入新的地址。
 		ip := <-ipv6Queue // 从IPv6队列获取地址
 		
@@ -676,10 +690,15 @@ func (p *LocalIPPool) ensureIPv6AddressCreated(ip net.IP) {
 
 	// 记录为活跃地址
 	p.activeIPv6Mutex.Lock()
+	// 检查是否是新地址（之前不在活跃地址列表中）
+	isNewAddr := !p.activeIPv6Addrs[ipStr]
 	p.activeIPv6Addrs[ipStr] = true
 	p.activeIPv6Mutex.Unlock()
 
-	fmt.Printf("[IP池] 已创建IPv6地址: %s/%s\n", ipStr, interfaceName)
+	// 只有新创建的地址才打印日志
+	if isNewAddr {
+		fmt.Printf("[IP池] 已创建IPv6地址: %s/%s\n", ipStr, interfaceName)
+	}
 }
 
 // isIPv6AddressExists 检查IPv6地址是否已在系统上存在
