@@ -273,6 +273,8 @@ func (c *UTlsClient) sendHTTP2Request(ctx context.Context, client *http.Client, 
 	}
 
 	resp, err := client.Do(httpReq)
+	// 清理httpReq对象引用，帮助GC回收
+	httpReq = nil
 	if err != nil {
 		return 0, nil, fmt.Errorf("发送HTTP/2请求失败: %w", err)
 	}
@@ -285,7 +287,10 @@ func (c *UTlsClient) sendHTTP2Request(ctx context.Context, client *http.Client, 
 			// 即使io.ReadAll已经读取了所有数据，这里也能确保连接状态正确
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			// 清理resp对象引用
+			resp.Body = nil
 		}
+		resp = nil
 	}()
 
 	body, err := io.ReadAll(resp.Body)
@@ -294,7 +299,8 @@ func (c *UTlsClient) sendHTTP2Request(ctx context.Context, client *http.Client, 
 		return resp.StatusCode, nil, fmt.Errorf("读取HTTP/2响应体失败: %w", err)
 	}
 
-	return resp.StatusCode, body, nil
+	statusCode := resp.StatusCode
+	return statusCode, body, nil
 }
 
 func (c *UTlsClient) createConnection(req *UTlsRequest, isHTTPS bool, port string) (*connInfo, error) {
@@ -374,7 +380,10 @@ func (c *UTlsClient) sendHTTPRequest(conn net.Conn, req *UTlsRequest) error {
 	}
 	// ... header setting logic ...
 
-	return httpReq.Write(conn)
+	err = httpReq.Write(conn)
+	// 清理httpReq对象引用，帮助GC回收
+	httpReq = nil
+	return err
 }
 
 func (c *UTlsClient) readHTTPResponse(conn net.Conn) (int, []byte, error) {
