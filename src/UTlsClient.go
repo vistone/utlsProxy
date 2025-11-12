@@ -98,8 +98,19 @@ func (c *UTlsClient) Do(req *UTlsRequest) (*UTlsResponse, error) {
 	startTime := time.Now()
 	isHTTPS := strings.HasPrefix(strings.ToLower(req.Path), "https://")
 
+	// 设置总超时时间：如果req.Timeout > 0，使用req.Timeout；否则使用ReadTimeout
+	totalTimeout := req.Timeout
+	if totalTimeout <= 0 {
+		totalTimeout = c.getReadTimeout()
+	}
+	deadline := time.Now().Add(totalTimeout)
+
 	maxRetries := 3
 	for retry := 0; retry <= maxRetries; retry++ {
+		// 检查是否已经超过总超时时间
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("请求超时：超过总超时时间 %v", totalTimeout)
+		}
 		var connMeta *ConnMetadata
 		var err error
 		var usePool bool
@@ -150,28 +161,30 @@ func (c *UTlsClient) Do(req *UTlsRequest) (*UTlsResponse, error) {
 		var statusCode int
 		var body []byte
 		var localIP string
-		var cancel context.CancelFunc
-		timeout := req.Timeout
+		
+		// 计算剩余超时时间
+		remainingTimeout := time.Until(deadline)
+		if remainingTimeout <= 0 {
+			return nil, fmt.Errorf("请求超时：超过总超时时间 %v", totalTimeout)
+		}
+		// 确保超时时间不超过请求的超时时间
+		if req.Timeout > 0 && remainingTimeout > req.Timeout {
+			remainingTimeout = req.Timeout
+		}
 
 		if connMeta.HttpClient != nil { // HTTP/2 path
-			ctx := context.Background()
-			if timeout > 0 {
-				ctx, cancel = context.WithTimeout(ctx, timeout)
-			}
+			ctx, cancel := context.WithTimeout(context.Background(), remainingTimeout)
+			defer cancel()
 			statusCode, body, err = c.sendHTTP2Request(ctx, connMeta.HttpClient, req)
 		} else { // HTTP/1.1 path
-			if timeout > 0 && connMeta.Conn != nil {
-				_ = connMeta.Conn.SetDeadline(time.Now().Add(timeout))
+			if connMeta.Conn != nil {
+				_ = connMeta.Conn.SetDeadline(time.Now().Add(remainingTimeout))
 				defer func() { _ = connMeta.Conn.SetDeadline(time.Time{}) }()
 			}
 			err = c.sendHTTPRequest(connMeta.Conn, req)
 			if err == nil {
 				statusCode, body, err = c.readHTTPResponse(connMeta.Conn)
 			}
-		}
-
-		if cancel != nil {
-			cancel()
 		}
 
 		if connMeta != nil {

@@ -794,8 +794,23 @@ func (p *domainConnPool) isConnValid(conn *utls.UConn) bool {
 	if conn == nil {
 		return false
 	}
+	
+	// 检查连接状态
 	state := conn.ConnectionState()
-	return state.HandshakeComplete && conn.RemoteAddr() != nil
+	if !state.HandshakeComplete || conn.RemoteAddr() == nil {
+		return false
+	}
+	
+	// 尝试设置一个很短的读取超时来检测连接是否真的可用
+	// 如果连接已经被关闭，SetReadDeadline会立即返回错误
+	originalDeadline := time.Now().Add(100 * time.Millisecond)
+	if err := conn.SetReadDeadline(originalDeadline); err != nil {
+		return false
+	}
+	// 恢复deadline
+	_ = conn.SetReadDeadline(time.Time{})
+	
+	return true
 }
 func (p *domainConnPool) UpdateIPStats(targetIP string, statusCode int) {
 	if targetIP == "" {
