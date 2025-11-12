@@ -88,12 +88,22 @@ func main() {
 			}
 		}
 	}
-
-	// 等待连接就绪（最多等待5秒）
-	if err := waitForReady(conn, 5*time.Second); err != nil {
-		log.Fatalf("等待连接就绪失败: %v", err)
+	
+	// 等待连接就绪（KCP可能需要更长时间，最多等待10秒）
+	// 如果超时，对于KCP连接，允许继续尝试（KCP连接可能不会自动变为READY）
+	initialState := conn.GetState()
+	log.Printf("初始连接状态: %v", initialState)
+	
+	if err := waitForReady(conn, 10*time.Second); err != nil {
+		if useKCP {
+			// KCP连接可能不会自动变为READY状态，允许继续尝试
+			log.Printf("警告: 等待KCP连接就绪超时，但允许继续尝试（当前状态: %v）", conn.GetState())
+		} else {
+			log.Fatalf("等待连接就绪失败: %v", err)
+		}
+	} else {
+		log.Printf("连接已就绪，状态: %v", conn.GetState())
 	}
-	log.Printf("连接已就绪，状态: %v", conn.GetState())
 
 	defer func() { _ = conn.Close() }()
 
@@ -163,8 +173,13 @@ func main() {
 			}
 		}
 
-		if err := waitForReady(conn, 3*time.Second); err != nil {
-			return fmt.Errorf("等待连接就绪失败: %w", err)
+		// 对于KCP连接，如果等待超时，允许继续（KCP可能不会自动变为READY）
+		if err := waitForReady(conn, 5*time.Second); err != nil {
+			if useKCP {
+				log.Printf("警告: 重连后等待KCP连接就绪超时，但允许继续尝试（当前状态: %v）", conn.GetState())
+			} else {
+				return fmt.Errorf("等待连接就绪失败: %w", err)
+			}
 		}
 
 		if reconnectCount <= 3 || reconnectCount%10 == 0 {
@@ -222,6 +237,7 @@ func main() {
 					connMutex.Unlock()
 
 					// 检查连接状态，如果不是 READY 则等待或重连
+					// 注意：对于KCP连接，即使状态不是READY也可能可以工作
 					if currentConn != nil {
 						state := currentConn.GetState()
 						if state != connectivity.Ready {
@@ -231,12 +247,24 @@ func main() {
 							// 如果连接正在连接中，等待一小段时间
 							if state == connectivity.Connecting {
 								cancel() // 取消当前上下文
-								time.Sleep(200 * time.Millisecond)
+								// KCP连接可能需要更长时间
+								waitTime := 500 * time.Millisecond
+								if useKCP {
+									waitTime = 1 * time.Second
+								}
+								time.Sleep(waitTime)
 								// 再次检查状态
 								connMutex.Lock()
-								if conn != nil && conn.GetState() == connectivity.Ready {
-									currentClient = client
-									currentConn = conn
+								if conn != nil {
+									newState := conn.GetState()
+									if newState == connectivity.Ready {
+										currentClient = client
+										currentConn = conn
+									} else if useKCP && newState == connectivity.Connecting {
+										// KCP连接可能一直处于CONNECTING状态，允许尝试发送请求
+										currentClient = client
+										currentConn = conn
+									}
 								}
 								connMutex.Unlock()
 								// 重新创建上下文
@@ -259,6 +287,11 @@ func main() {
 									// 重新创建上下文
 									ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
 									continue
+								}
+							} else if useKCP && state == connectivity.Idle {
+								// KCP连接可能处于Idle状态，允许尝试发送请求
+								if idx < 5 {
+									log.Printf("[任务 %d] KCP连接处于Idle状态，允许尝试发送请求", idx)
 								}
 							}
 						}
@@ -351,7 +384,7 @@ func main() {
 						time.Sleep(rpcRetryDelay)
 						continue
 					}
-					
+
 					// 请求成功，取消上下文
 					cancel()
 
