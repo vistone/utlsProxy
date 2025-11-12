@@ -168,10 +168,8 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 	}
 	atomic.AddInt64(&s.crawler.stats.GRPCResponseBytes, responseSize)
 	
-	// 调试日志：确认响应体已正确设置
-	if bodyLen > 0 {
-		log.Printf("[gRPC] 响应已准备: client_id=%s, status=%d, body_len=%d", req.ClientID, statusCode, bodyLen)
-	} else {
+	// 只在响应体为空时记录警告日志，成功响应不记录日志以减少内存占用
+	if bodyLen == 0 {
 		log.Printf("[gRPC] 警告: 响应体为空: client_id=%s, status=%d", req.ClientID, statusCode)
 	}
 	
@@ -235,7 +233,10 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 				resp.Body = nil
 				resp = nil
 			}
-			log.Printf("[gRPC] 任务(%s) 第 %d 次请求失败 [目标IP: %s, 耗时: %v]: %v", clientID, attempt, targetIP, duration, err)
+			// 只在最后一次尝试失败时记录日志，减少日志输出
+			if attempt == maxAttempts {
+				log.Printf("[gRPC] 任务(%s) 第 %d 次请求失败 [目标IP: %s, 耗时: %v]: %v", clientID, attempt, targetIP, duration, err)
+			}
 			continue
 		}
 
@@ -246,7 +247,10 @@ func (c *Crawler) handleTaskRequest(ctx context.Context, clientID, path string) 
 				resp.Body = nil
 				resp = nil // 清空resp对象引用，帮助GC回收
 			}
-			log.Printf("[gRPC] 任务(%s) 第 %d 次超时 [目标IP: %s, 耗时: %v]，返回超时让客户端重试", clientID, attempt, targetIP, duration)
+			// 只在最后一次尝试超时时记录日志，减少日志输出
+			if attempt == maxAttempts {
+				log.Printf("[gRPC] 任务(%s) 第 %d 次超时 [目标IP: %s, 耗时: %v]，返回超时让客户端重试", clientID, attempt, targetIP, duration)
+			}
 			return 0, nil, fmt.Errorf("请求超时（耗时 %v，超过 %v），请客户端重试", duration, serverTimeout)
 		}
 

@@ -90,10 +90,9 @@ func main() {
 						if attempt == rpcMaxAttempts {
 							atomic.AddUint64(&failCount, 1)
 							log.Printf("[任务 %d] gRPC 调用失败（第 %d/%d 次）: %v", idx, attempt, rpcMaxAttempts, err)
-						} else {
-							log.Printf("[任务 %d] gRPC 调用失败（第 %d/%d 次）: %v，准备重试", idx, attempt, rpcMaxAttempts, err)
-							time.Sleep(rpcRetryDelay)
 						}
+						// 只在最后一次尝试失败时记录日志，减少日志输出
+						time.Sleep(rpcRetryDelay)
 						continue
 					}
 
@@ -101,42 +100,35 @@ func main() {
 						if attempt == rpcMaxAttempts {
 							atomic.AddUint64(&failCount, 1)
 							log.Printf("[任务 %d] 服务器返回错误（第 %d/%d 次）: %s (status=%d)", idx, attempt, rpcMaxAttempts, resp.ErrorMessage, resp.StatusCode)
-						} else {
-							log.Printf("[任务 %d] 服务器返回错误（第 %d/%d 次）: %s (status=%d)，准备重试", idx, attempt, rpcMaxAttempts, resp.ErrorMessage, resp.StatusCode)
-							time.Sleep(rpcRetryDelay)
 						}
+						// 只在最后一次尝试失败时记录日志，减少日志输出
+						time.Sleep(rpcRetryDelay)
 						continue
 					}
 
 					atomic.AddUint64(&successCount, 1)
 					bodyLen := len(resp.Body)
-					bodyPreview := ""
+					
 					if bodyLen > 0 {
-						// 显示响应体的前100个字节（十六进制）
-						previewLen := bodyLen
-						if previewLen > 100 {
-							previewLen = 100
-						}
-						bodyPreview = fmt.Sprintf(", body_preview=%x", resp.Body[:previewLen])
-						if bodyLen > 100 {
-							bodyPreview += "..."
-						}
-
 						// 保存响应体到文件（gzip格式）
 						filename := fmt.Sprintf("task_%d_%d_%d.gz", idx, attempt, time.Now().UnixNano())
 						filePath := filepath.Join(outputDir, filename)
 						if err := os.WriteFile(filePath, resp.Body, 0644); err != nil {
+							// 只在保存失败时记录日志
 							log.Printf("[任务 %d] 警告: 保存响应体到文件失败: %v", idx, err)
-						} else {
-							log.Printf("[任务 %d] 响应体已保存: %s (%d 字节)", idx, filePath, bodyLen)
 						}
+						// 成功保存不记录日志，减少日志输出和内存占用
 
 						// 立即释放响应体内存，避免内存累积
 						resp.Body = nil
-					} else {
-						bodyPreview = ", body_preview=(空)"
 					}
-					log.Printf("[任务 %d] 成功（第 %d/%d 次）: client_id=%s status=%d body_len=%d%s", idx, attempt, rpcMaxAttempts, resp.ClientID, resp.StatusCode, bodyLen, bodyPreview)
+					
+					// 采样日志：每1000次成功记录一次，减少日志输出和内存占用
+					successCountValue := atomic.LoadUint64(&successCount)
+					if successCountValue%1000 == 0 {
+						log.Printf("[任务 %d] 成功（第 %d/%d 次）: client_id=%s status=%d body_len=%d", idx, attempt, rpcMaxAttempts, resp.ClientID, resp.StatusCode, bodyLen)
+					}
+					
 					success = true
 					break
 				}
