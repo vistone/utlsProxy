@@ -916,17 +916,15 @@ func (p *LocalIPPool) adjustIPv6AddressPool() {
 	}
 
 	// 只负责创建地址，不在这里删除（删除由cleanupUnusedIPv6Addresses负责）
-	// 如果活跃地址太少，批量创建新地址
-	// 但是要避免频繁创建：如果活跃地址已经接近目标值，就不要继续创建
+	// 如果活跃地址少于目标值，批量创建新地址补充
+	// 但只在差距较大时才批量创建，小差距时让GetIP()按需创建
 	if activeCount < minActive {
 		needed := minActive - activeCount
-		// 如果差距很小（小于batchSize），说明已经在接近目标值，不需要批量创建
-		// 让GetIP()自然创建即可
+		// 如果差距较大（>=batchSize），批量创建
 		if needed >= batchSize {
 			p.batchCreateIPv6Addresses(batchSize, subnet, interfaceName)
 		}
-		// 如果差距小于batchSize，说明已经接近目标值，不需要批量创建
-		// 这样可以避免频繁创建，让GetIP()按需创建即可
+		// 如果差距较小（<batchSize），让GetIP()按需创建即可，避免频繁批量操作
 	}
 }
 
@@ -1004,44 +1002,69 @@ func (p *LocalIPPool) batchDeleteIPv6Addresses(count int, interfaceName string, 
 }
 
 // SetTargetIPCount 设置目标IP数量（用于IPv6地址池动态调整）
+// 目标：创建与RemoteDomainIPPool对等的IPv6地址池
 func (p *LocalIPPool) SetTargetIPCount(count int) {
 	if count <= 0 {
 		return
 	}
 
 	p.mu.Lock()
-	p.minActiveAddrs = count  // 最小活跃地址数 = 目标IP数量
-	p.maxActiveAddrs = count * 2 // 最大活跃地址数 = 目标IP数量的2倍（留有余量）
+	p.minActiveAddrs = count  // 最小活跃地址数 = 目标IP数量（与RemoteDomainIPPool对等）
+	p.maxActiveAddrs = count   // 最大活跃地址数 = 目标IP数量（保持对等，不留余量）
 	p.mu.Unlock()
 
-	// 如果支持IPv6，立即触发一次调整
+	// 如果支持IPv6，立即创建对等数量的地址池
 	if p.hasIPv6Support && p.ipv6Subnet != nil {
-		p.adjustIPv6AddressPool()
-		// 如果当前活跃地址不足，立即批量创建
 		p.activeIPv6Mutex.RLock()
 		activeCount := len(p.activeIPv6Addrs)
 		p.activeIPv6Mutex.RUnlock()
 
+		p.mu.RLock()
+		subnet := p.ipv6Subnet
+		interfaceName := p.ipv6Interface
+		p.mu.RUnlock()
+		
+		if interfaceName == "" {
+			interfaceName = "ipv6net"
+		}
+
+		// 如果当前活跃地址不足，立即批量创建到目标数量
 		if activeCount < count {
 			needed := count - activeCount
-			if needed > p.batchSize {
-				needed = p.batchSize
-			}
-			p.mu.RLock()
-			subnet := p.ipv6Subnet
-			interfaceName := p.ipv6Interface
-			p.mu.RUnlock()
-			if interfaceName == "" {
-				interfaceName = "ipv6net"
-			}
 			p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
+			fmt.Printf("[IP池] 已创建 %d 个IPv6地址，与目标IP数量对等（总数: %d）\n", needed, count)
+		} else if activeCount > count {
+			// 如果当前活跃地址超过目标值，删除多余的未使用地址
+			p.activeIPv6Mutex.RLock()
+			p.usedIPv6Mutex.RLock()
+			
+			unusedAddrs := make([]string, 0)
+			for addr := range p.activeIPv6Addrs {
+				if !p.usedIPv6Addrs[addr] {
+					unusedAddrs = append(unusedAddrs, addr)
+				}
+			}
+			
+			p.usedIPv6Mutex.RUnlock()
+			p.activeIPv6Mutex.RUnlock()
+			
+			excess := activeCount - count
+			if len(unusedAddrs) > 0 && excess > 0 {
+				toDelete := excess
+				if toDelete > len(unusedAddrs) {
+					toDelete = len(unusedAddrs)
+				}
+				p.batchDeleteIPv6Addresses(toDelete, interfaceName, unusedAddrs[:toDelete])
+				fmt.Printf("[IP池] 已删除 %d 个多余的IPv6地址，保持与目标IP数量对等\n", toDelete)
+			}
 		}
 	}
 
-	fmt.Printf("[IP池] 已设置目标IP数量: %d，最小活跃地址: %d，最大活跃地址: %d\n", count, count, count*2)
+	fmt.Printf("[IP池] 已设置目标IP数量: %d，IPv6地址池大小: %d（与RemoteDomainIPPool对等）\n", count, count)
 }
 
-// cleanupUnusedIPv6Addresses 每20分钟清理一次未使用的IPv6地址
+// cleanupUnusedIPv6Addresses 每20分钟清理一次未使用的IPv6地址，并替换为新地址
+// 策略：删除空闲地址并创建新地址替换，保持地址池大小与目标IP数量对等
 func (p *LocalIPPool) cleanupUnusedIPv6Addresses() {
 	p.cleanupMutex.Lock()
 	now := time.Now()
@@ -1056,10 +1079,11 @@ func (p *LocalIPPool) cleanupUnusedIPv6Addresses() {
 	p.mu.RLock()
 	hasSupport := p.hasIPv6Support
 	interfaceName := p.ipv6Interface
-	maxActive := p.maxActiveAddrs
+	minActive := p.minActiveAddrs
+	subnet := p.ipv6Subnet
 	p.mu.RUnlock()
 
-	if !hasSupport {
+	if !hasSupport || subnet == nil {
 		return
 	}
 
@@ -1073,7 +1097,7 @@ func (p *LocalIPPool) cleanupUnusedIPv6Addresses() {
 
 	activeCount := len(p.activeIPv6Addrs)
 	
-	// 找出未使用的地址
+	// 找出未使用的地址（空闲地址）
 	unusedAddrs := make([]string, 0)
 	for addr := range p.activeIPv6Addrs {
 		if !p.usedIPv6Addrs[addr] {
@@ -1084,32 +1108,45 @@ func (p *LocalIPPool) cleanupUnusedIPv6Addresses() {
 	p.usedIPv6Mutex.RUnlock()
 	p.activeIPv6Mutex.RUnlock()
 
-	// 如果活跃地址超过最大值，删除多余的未使用地址
-	if maxActive > 0 && activeCount > maxActive && len(unusedAddrs) > 0 {
-		excess := activeCount - maxActive
-		if excess > len(unusedAddrs) {
-			excess = len(unusedAddrs)
+	// 如果目标IP数量未设置，跳过
+	if minActive == 0 {
+		return
+	}
+
+	// 策略：始终保持地址池大小与目标IP数量对等
+	// 1. 如果活跃地址少于目标值，创建新地址补充
+	if activeCount < minActive {
+		needed := minActive - activeCount
+		p.batchCreateIPv6Addresses(needed, subnet, interfaceName)
+		fmt.Printf("[IP池] 定期清理: 补充创建了 %d 个IPv6地址，保持与目标IP数量对等\n", needed)
+		return
+	}
+
+	// 2. 如果活跃地址等于目标值，替换所有空闲地址
+	if activeCount == minActive {
+		if len(unusedAddrs) > 0 {
+			// 删除所有空闲地址
+			p.batchDeleteIPv6Addresses(len(unusedAddrs), interfaceName, unusedAddrs)
+			// 创建相同数量的新地址替换
+			p.batchCreateIPv6Addresses(len(unusedAddrs), subnet, interfaceName)
+			fmt.Printf("[IP池] 定期清理: 替换了 %d 个空闲IPv6地址（20分钟周期）\n", len(unusedAddrs))
+		} else {
+			fmt.Printf("[IP池] 定期清理: 所有地址都在使用中，等待空闲后再替换\n")
 		}
-		// 只删除多余的未使用地址
-		p.batchDeleteIPv6Addresses(excess, interfaceName, unusedAddrs[:excess])
-		fmt.Printf("[IP池] 定期清理: 删除了 %d 个未使用的IPv6地址（20分钟周期）\n", excess)
-	} else if len(unusedAddrs) > 0 {
-		// 即使没有超过最大值，也清理一些长期未使用的地址（保留足够的缓冲）
-		// 保留至少 minActive 个地址，删除多余的未使用地址
-		p.mu.RLock()
-		minActive := p.minActiveAddrs
-		p.mu.RUnlock()
-		
-		if minActive > 0 && activeCount > minActive {
-			// 删除超出最小值的未使用地址的一半（避免一次性删除太多）
-			toDelete := (activeCount - minActive) / 2
+		return
+	}
+
+	// 3. 如果活跃地址超过目标值，删除多余的未使用地址
+	if activeCount > minActive {
+		excess := activeCount - minActive
+		if len(unusedAddrs) > 0 {
+			// 删除多余的未使用地址
+			toDelete := excess
 			if toDelete > len(unusedAddrs) {
 				toDelete = len(unusedAddrs)
 			}
-			if toDelete > 0 {
-				p.batchDeleteIPv6Addresses(toDelete, interfaceName, unusedAddrs[:toDelete])
-				fmt.Printf("[IP池] 定期清理: 删除了 %d 个未使用的IPv6地址（20分钟周期，保持最小活跃数）\n", toDelete)
-			}
+			p.batchDeleteIPv6Addresses(toDelete, interfaceName, unusedAddrs[:toDelete])
+			fmt.Printf("[IP池] 定期清理: 删除了 %d 个多余的IPv6地址，保持与目标IP数量对等\n", toDelete)
 		}
 	}
 }
