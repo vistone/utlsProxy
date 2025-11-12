@@ -10,27 +10,40 @@
 
 **Linux/macOS 用法**:
 ```bash
-# 方式1: 直接下载并执行
+# 方式1: 直接下载并执行（推荐）
 curl -fsSL https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install.sh | bash
 
-# 方式2: 下载后执行
+# 方式2: 如果方式1失败，使用简化安装脚本（直接从源码编译）
+curl -fsSL https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install-simple.sh | bash
+
+# 方式3: 使用 Git 克隆后安装（最可靠）
+git clone https://github.com/vistone/utlsProxy.git
+cd utlsProxy
+bash scripts/install.sh
+
+# 方式4: 下载后执行
 wget https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install.sh
 chmod +x install.sh
 ./install.sh
 
-# 方式3: 指定版本安装
+# 方式5: 指定版本安装
 ./install.sh v1.0.4
 ```
 
 **Windows 用法**:
 ```powershell
-# 方式1: 直接下载并执行
+# 方式1: 直接下载并执行（推荐）
 irm https://raw.githubusercontent.com/vistone/utlsProxy/main/scripts/install.ps1 | iex
 
-# 方式2: 下载后执行
+# 方式2: 如果方式1失败，使用 Git 克隆后安装
+git clone https://github.com/vistone/utlsProxy.git
+cd utlsProxy
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+
+# 方式3: 下载后执行
 powershell -ExecutionPolicy Bypass -File install.ps1
 
-# 方式3: 指定版本安装
+# 方式4: 指定版本安装
 powershell -ExecutionPolicy Bypass -File install.ps1 v1.0.4
 ```
 
@@ -44,6 +57,12 @@ powershell -ExecutionPolicy Bypass -File install.ps1 v1.0.4
 **环境要求**:
 - 如果使用预编译二进制：无需额外依赖
 - 如果从源码编译：需要 Go 1.25+ 和 Git
+
+**故障排除**:
+- 如果遇到 404 错误，可能是 GitHub CDN 同步延迟，请尝试：
+  1. 使用 `install-simple.sh` 简化安装脚本
+  2. 使用 Git 克隆方式安装（最可靠）
+  3. 等待几分钟后重试
 
 **自定义安装目录**:
 ```bash

@@ -147,65 +147,66 @@ get_latest_version() {
 build_from_source() {
     local version=$1
     
-    log_info "从源码编译安装..."
+    log_info "从源码编译安装..." >&2
     
     # 创建临时目录
     local temp_dir=$(mktemp -d)
     trap "rm -rf ${temp_dir}" EXIT
     
-    log_info "克隆仓库到临时目录..."
+    log_info "克隆仓库到临时目录..." >&2
     if command_exists git; then
         git clone --depth 1 --branch "${version}" "${GITHUB_URL}.git" "${temp_dir}" 2>/dev/null || \
         git clone --depth 1 "${GITHUB_URL}.git" "${temp_dir}"
     else
-        log_error "未找到 git，无法从源码编译"
+        log_error "未找到 git，无法从源码编译" >&2
         exit 1
     fi
     
     cd "${temp_dir}"
     
-    log_info "开始编译..."
+    log_info "开始编译..." >&2
     
     # 编译所有可执行文件
     local build_errors=0
     
     # 编译 DNS 监控程序
     if [ -d "cmd/DNS" ]; then
-        log_info "编译 DNS 监控程序..."
+        log_info "编译 DNS 监控程序..." >&2
         if go build -o "${temp_dir}/dns-monitor" ./cmd/DNS; then
-            log_success "DNS 监控程序编译成功"
+            log_success "DNS 监控程序编译成功" >&2
         else
-            log_warn "DNS 监控程序编译失败"
+            log_warn "DNS 监控程序编译失败" >&2
             build_errors=$((build_errors + 1))
         fi
     fi
     
     # 编译 Crawler
     if [ -d "cmd/Crawler" ]; then
-        log_info "编译 Crawler..."
+        log_info "编译 Crawler..." >&2
         if go build -o "${temp_dir}/crawler" ./cmd/Crawler; then
-            log_success "Crawler 编译成功"
+            log_success "Crawler 编译成功" >&2
         else
-            log_warn "Crawler 编译失败"
+            log_warn "Crawler 编译失败" >&2
             build_errors=$((build_errors + 1))
         fi
     fi
     
     # 编译 TaskClient
     if [ -d "cmd/TaskClient" ]; then
-        log_info "编译 TaskClient..."
+        log_info "编译 TaskClient..." >&2
         if go build -o "${temp_dir}/task-client" ./cmd/TaskClient; then
-            log_success "TaskClient 编译成功"
+            log_success "TaskClient 编译成功" >&2
         else
-            log_warn "TaskClient 编译失败"
+            log_warn "TaskClient 编译失败" >&2
             build_errors=$((build_errors + 1))
         fi
     fi
     
     if [ $build_errors -gt 0 ]; then
-        log_warn "部分程序编译失败，但会继续安装已编译的程序"
+        log_warn "部分程序编译失败，但会继续安装已编译的程序" >&2
     fi
     
+    # 只输出目录路径到标准输出
     echo "${temp_dir}"
 }
 

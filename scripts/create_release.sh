@@ -20,9 +20,10 @@ VERSION_FILE="VERSION"
 # 获取版本号
 get_version() {
     if [ -n "$1" ]; then
-        echo "$1"
+        # 清理版本号，移除可能的颜色代码和额外文本
+        echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1
     elif [ -f "$VERSION_FILE" ]; then
-        cat "$VERSION_FILE"
+        cat "$VERSION_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
     else
         echo -e "${RED}错误: 未指定版本号且VERSION文件不存在${NC}"
         exit 1

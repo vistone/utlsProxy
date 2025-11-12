@@ -203,9 +203,22 @@ func (p *domainConnPool) createConnection(localIP, targetIP string, skipWhitelis
 		dialer.LocalAddr = &net.TCPAddr{IP: localIPAddr, Port: 0}
 	}
 
+	// 尝试使用指定的本地IP连接
 	tcpConn, err := dialer.Dial("tcp", net.JoinHostPort(targetIP, p.port))
 	if err != nil {
-		return nil, fmt.Errorf("TCP连接失败: %w", err)
+		// 如果绑定本地IP失败（通常是IPv6地址未在系统上配置），尝试不绑定本地IP
+		if localIP != "" && (strings.Contains(err.Error(), "cannot assign requested address") || 
+			strings.Contains(err.Error(), "bind: cannot assign requested address")) {
+			// 回退到不绑定本地IP的方式
+			dialerWithoutLocal := net.Dialer{Timeout: p.healthCheckClient.DialTimeout}
+			tcpConn, err = dialerWithoutLocal.Dial("tcp", net.JoinHostPort(targetIP, p.port))
+			if err != nil {
+				return nil, fmt.Errorf("TCP连接失败（已尝试回退）: %w", err)
+			}
+			// 注意：这里不更新 localIP 变量，保持原始意图记录
+		} else {
+			return nil, fmt.Errorf("TCP连接失败: %w", err)
+		}
 	}
 
 	fingerprint := p.fingerprint
