@@ -108,14 +108,14 @@ func main() {
 					}
 
 					atomic.AddUint64(&successCount, 1)
-					
+
 					// 优先使用文件路径，避免大响应体占用内存
 					var bodyLen int
 					if resp.FilePath != "" {
 						// 服务器端已经将响应体写入文件，直接复制文件
 						filename := fmt.Sprintf("task_%d_%d_%d.gz", idx, attempt, time.Now().UnixNano())
 						destPath := filepath.Join(outputDir, filename)
-						
+
 						// 直接复制文件，避免读取到内存
 						srcFile, err := os.Open(resp.FilePath)
 						if err != nil {

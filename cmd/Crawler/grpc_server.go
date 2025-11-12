@@ -175,7 +175,7 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 			resp.FilePath = tempFile
 			resp.Body = nil // 清空body，释放内存
 			body = nil
-			bodyLen = 0 // 文件大小通过FilePath传递
+			// bodyLen保持原值用于统计
 			
 			// 使用goroutine在响应发送后清理临时文件
 			go func(filePath string) {
@@ -190,6 +190,7 @@ func (s *taskService) Execute(ctx context.Context, req *taskapi.TaskRequest) (*t
 		resp.Body = body
 	}
 	// 记录gRPC响应大小（响应体）
+	// 如果使用文件路径，bodyLen仍然是原始大小，用于统计
 	responseSize := int64(bodyLen)
 	if resp.ErrorMessage != "" {
 		responseSize += int64(len(resp.ErrorMessage))
