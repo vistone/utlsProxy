@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +23,7 @@ func main() {
 		requestTimeout  = 10 * time.Second
 		rpcMaxAttempts  = 5
 		rpcRetryDelay   = 50 * time.Millisecond
+		outputDir       = "./taskclient_data" // 响应体保存目录
 	)
 
 	if repeatCount <= 0 {
@@ -29,6 +32,12 @@ func main() {
 	if concurrency <= 0 {
 		log.Fatal("concurrency 必须大于 0")
 	}
+
+	// 创建输出目录
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Fatalf("创建输出目录失败: %v", err)
+	}
+	log.Printf("响应体将保存到目录: %s", outputDir)
 
 	conn, err := taskapi.Dial(serverAddress)
 	if err != nil {
@@ -111,6 +120,15 @@ func main() {
 						bodyPreview = fmt.Sprintf(", body_preview=%x", resp.Body[:previewLen])
 						if bodyLen > 100 {
 							bodyPreview += "..."
+						}
+
+						// 保存响应体到文件
+						filename := fmt.Sprintf("task_%d_%d_%d.bin", idx, attempt, time.Now().UnixNano())
+						filePath := filepath.Join(outputDir, filename)
+						if err := os.WriteFile(filePath, resp.Body, 0644); err != nil {
+							log.Printf("[任务 %d] 警告: 保存响应体到文件失败: %v", idx, err)
+						} else {
+							log.Printf("[任务 %d] 响应体已保存: %s (%d 字节)", idx, filePath, bodyLen)
 						}
 					} else {
 						bodyPreview = ", body_preview=(空)"
