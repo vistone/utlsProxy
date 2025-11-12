@@ -828,6 +828,31 @@ func (p *LocalIPPool) MarkIPUnused(ip net.IP) {
 	p.usedIPv6Mutex.Unlock()
 }
 
+// isReservedIPv6Address 检查IPv6地址是否是系统保留地址（不应该删除）
+func isReservedIPv6Address(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	
+	ipStr := ip.String()
+	// 检查是否是常见的系统保留地址
+	// ::1 - 回环地址
+	// ::2 - 通常是网关地址或系统保留地址
+	// fe80:: - 链路本地地址
+	// ff00:: - 多播地址
+	
+	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	
+	// 检查是否是 ::2 地址（通常是网关地址）
+	if strings.HasSuffix(ipStr, "::2") || strings.HasSuffix(ipStr, ":2") {
+		return true
+	}
+	
+	return false
+}
+
 // cleanupOldIPv6Addresses 清理子网下的所有旧IPv6地址（启动时调用）
 func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 	p.mu.RLock()
@@ -849,6 +874,7 @@ func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 	// 解析输出，找到所有属于子网的IPv6地址
 	lines := strings.Split(string(output), "\n")
 	cleaned := 0
+	skipped := 0
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -870,11 +896,17 @@ func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 
 		// 检查地址是否属于子网
 		if subnet.Contains(ip) {
+			// 跳过系统保留地址（如 ::2）
+			if isReservedIPv6Address(ip) {
+				skipped++
+				continue
+			}
+			
 			// 删除地址
 			delCmd := exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", interfaceName)
 			if err := delCmd.Run(); err != nil {
-				// 删除失败，记录但不阻塞
-				fmt.Printf("[IP池] 警告: 清理旧IPv6地址 %s 失败: %v\n", ip.String(), err)
+				// 删除失败，可能是系统保留地址，静默跳过
+				skipped++
 			} else {
 				cleaned++
 			}
@@ -882,7 +914,13 @@ func (p *LocalIPPool) cleanupOldIPv6Addresses(subnet *net.IPNet) {
 	}
 
 	if cleaned > 0 {
-		fmt.Printf("[IP池] 启动时已清理 %d 个旧IPv6地址\n", cleaned)
+		fmt.Printf("[IP池] 启动时已清理 %d 个旧IPv6地址", cleaned)
+		if skipped > 0 {
+			fmt.Printf("，跳过了 %d 个系统保留地址", skipped)
+		}
+		fmt.Println()
+	} else if skipped > 0 {
+		fmt.Printf("[IP池] 启动时跳过了 %d 个系统保留地址（如 ::2），未清理任何地址\n", skipped)
 	}
 }
 
