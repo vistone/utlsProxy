@@ -1,7 +1,6 @@
 [ServerConfig]
 Version="v1.0.11"
 ServerPort=9091
-UseKCP=true # 是否使用KCP传输（true=KCP UDP, false=TCP）
 
 [DNSDomain]
 HostName=["kh.google.com","earth.google.com","khmdb.google.com"]

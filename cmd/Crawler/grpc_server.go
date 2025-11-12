@@ -30,65 +30,21 @@ func (c *Crawler) startGRPCServer() error {
 	
 	address := fmt.Sprintf(":%d", c.config.ServerConfig.ServerPort)
 	
-	var listener net.Listener
-	var err error
-	var server *grpc.Server
-	
-	log.Printf("[gRPC] 准备启动 gRPC 服务器，UseKCP=%v, Port=%d", c.config.ServerConfig.UseKCP, c.config.ServerConfig.ServerPort)
-	
-	if c.config.ServerConfig.UseKCP {
-		// 使用KCP传输
-		kcpConfig := taskapi.DefaultKCPConfig()
-		if kcpConfig == nil {
-			return fmt.Errorf("创建 KCP 配置失败: kcpConfig 为 nil")
-		}
-		log.Printf("[gRPC] 创建 KCP 服务器，配置: %+v", kcpConfig)
-		var listenerFactory func(string) (net.Listener, error)
-		server, listenerFactory = taskapi.NewServerKCP(kcpConfig)
-		log.Printf("[gRPC] NewServerKCP 返回: server=%v, listenerFactory=%v", server != nil, listenerFactory != nil)
-		if server == nil {
-			return fmt.Errorf("创建 gRPC KCP 服务器失败: server 为 nil")
-		}
-		if listenerFactory == nil {
-			return fmt.Errorf("创建 gRPC KCP 监听器工厂失败: listenerFactory 为 nil")
-		}
-		taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
-		log.Printf("[gRPC] 已注册 TaskServiceServer")
-		
-		listener, err = listenerFactory(address)
-		if err != nil {
-			return fmt.Errorf("监听 gRPC KCP 端口失败: %w", err)
-		}
-		if listener == nil {
-			return fmt.Errorf("创建 gRPC KCP 监听器失败: listener 为 nil")
-		}
-		log.Printf("任务 gRPC 服务启动（KCP传输），地址 %s", address)
-	} else {
-		// 使用TCP传输（默认）
-		listener, err = net.Listen("tcp", address)
-		if err != nil {
-			return fmt.Errorf("监听 gRPC TCP 端口失败: %w", err)
-		}
-		if listener == nil {
-			return fmt.Errorf("创建 gRPC TCP 监听器失败: listener 为 nil")
-		}
-		
-		server = taskapi.NewServer()
-		if server == nil {
-			return fmt.Errorf("创建 gRPC TCP 服务器失败: server 为 nil")
-		}
-		taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
-		log.Printf("任务 gRPC 服务启动（TCP传输），地址 %s", address)
-	}
-
-	// 双重检查，确保 server 和 listener 都不为 nil
-	log.Printf("[gRPC] 双重检查: server=%v, listener=%v", server != nil, listener != nil)
-	if server == nil {
-		return fmt.Errorf("gRPC 服务器未初始化: server 为 nil (UseKCP=%v)", c.config.ServerConfig.UseKCP)
+	// 使用TCP传输
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("监听 gRPC TCP 端口失败: %w", err)
 	}
 	if listener == nil {
-		return fmt.Errorf("gRPC 监听器未初始化: listener 为 nil")
+		return fmt.Errorf("创建 gRPC TCP 监听器失败: listener 为 nil")
 	}
+	
+	server := taskapi.NewServer()
+	if server == nil {
+		return fmt.Errorf("创建 gRPC TCP 服务器失败: server 为 nil")
+	}
+	taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
+	log.Printf("任务 gRPC 服务启动（TCP传输），地址 %s", address)
 
 	c.grpcListener = listener
 	c.grpcServer = server
