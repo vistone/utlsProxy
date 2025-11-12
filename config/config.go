@@ -25,6 +25,7 @@ type Config struct {
 type ServerConfig struct {
 	Version    string `toml:"Version"`    // 版本号
 	ServerPort int    `toml:"ServerPort"` // 服务器端口
+	UseKCP     bool   `toml:"UseKCP"`     // 是否使用KCP传输（默认false使用TCP）
 }
 
 // DNSDomainConfig DNS域名配置

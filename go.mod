@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/miekg/dns v1.1.68
 	github.com/refraction-networking/utls v1.8.1
+	github.com/xtaci/kcp-go/v5 v5.6.26
 	golang.org/x/net v0.46.0
 	google.golang.org/grpc v1.67.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -14,6 +15,10 @@ require (
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.1 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
+	github.com/klauspost/reedsolomon v1.12.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/tjfoc/gmsm v1.4.1 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect

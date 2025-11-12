@@ -22,13 +22,33 @@ type taskService struct {
 
 func (c *Crawler) startGRPCServer() error {
 	address := fmt.Sprintf(":%d", c.config.ServerConfig.ServerPort)
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return fmt.Errorf("监听 gRPC 端口失败: %w", err)
+	
+	var listener net.Listener
+	var err error
+	var server *grpc.Server
+	
+	if c.config.ServerConfig.UseKCP {
+		// 使用KCP传输
+		kcpConfig := taskapi.DefaultKCPConfig()
+		server, listenerFactory := taskapi.NewServerKCP(kcpConfig)
+		taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
+		
+		listener, err = listenerFactory(address)
+		if err != nil {
+			return fmt.Errorf("监听 gRPC KCP 端口失败: %w", err)
+		}
+		log.Printf("任务 gRPC 服务启动（KCP传输），地址 %s", address)
+	} else {
+		// 使用TCP传输（默认）
+		listener, err = net.Listen("tcp", address)
+		if err != nil {
+			return fmt.Errorf("监听 gRPC TCP 端口失败: %w", err)
+		}
+		
+		server = taskapi.NewServer()
+		taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
+		log.Printf("任务 gRPC 服务启动（TCP传输），地址 %s", address)
 	}
-
-	server := taskapi.NewServer()
-	taskapi.RegisterTaskServiceServer(server, &taskService{crawler: c})
 
 	c.grpcListener = listener
 	c.grpcServer = server
@@ -36,7 +56,6 @@ func (c *Crawler) startGRPCServer() error {
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		log.Printf("任务 gRPC 服务启动，地址 %s", address)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			log.Printf("任务 gRPC 服务异常退出: %v", err)
 		}

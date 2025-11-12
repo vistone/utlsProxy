@@ -68,18 +68,18 @@ type CrawlerStats struct {
 
 // SlowIPTracker 用于跟踪响应缓慢的IP
 type SlowIPTracker struct {
-	threshold time.Duration
-	counts    sync.Map
-	maxEntries int // 最大条目数，超过后清理旧数据
-	lastCleanup time.Time
+	threshold    time.Duration
+	counts       sync.Map
+	maxEntries   int // 最大条目数，超过后清理旧数据
+	lastCleanup  time.Time
 	cleanupMutex sync.Mutex
 }
 
 // NewSlowIPTracker 创建慢速IP跟踪器
 func NewSlowIPTracker(threshold time.Duration) *SlowIPTracker {
 	tracker := &SlowIPTracker{
-		threshold: threshold,
-		maxEntries: 1000, // 最多保存1000个慢IP记录
+		threshold:   threshold,
+		maxEntries:  1000, // 最多保存1000个慢IP记录
 		lastCleanup: time.Now(),
 	}
 	// 启动定期清理goroutine
@@ -91,7 +91,7 @@ func NewSlowIPTracker(threshold time.Duration) *SlowIPTracker {
 func (t *SlowIPTracker) periodicCleanup() {
 	ticker := time.NewTicker(10 * time.Minute) // 每10分钟清理一次
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		t.cleanupOldEntries()
 	}
@@ -101,14 +101,14 @@ func (t *SlowIPTracker) periodicCleanup() {
 func (t *SlowIPTracker) cleanupOldEntries() {
 	t.cleanupMutex.Lock()
 	defer t.cleanupMutex.Unlock()
-	
+
 	// 统计当前条目数
 	count := 0
 	t.counts.Range(func(key, value any) bool {
 		count++
 		return true
 	})
-	
+
 	// 如果超过最大条目数，清理一半
 	if count > t.maxEntries {
 		toDelete := count - t.maxEntries/2
@@ -122,7 +122,7 @@ func (t *SlowIPTracker) cleanupOldEntries() {
 		})
 		log.Printf("[慢IP跟踪] 清理了 %d 个旧条目，当前剩余 %d 个", deleted, count-deleted)
 	}
-	
+
 	t.lastCleanup = time.Now()
 }
 
@@ -219,13 +219,13 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 	if grpcConcurrency <= 0 {
 		grpcConcurrency = 500 // 默认500并发
 	}
-	
+
 	// 创建临时文件目录用于存储大响应体
 	tempFileDir := filepath.Join(dataDir, "grpc_temp")
 	if err := os.MkdirAll(tempFileDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建临时文件目录失败: %w", err)
 	}
-	
+
 	crawler := &Crawler{
 		pool:            pool,
 		client:          client,
@@ -245,7 +245,7 @@ func NewCrawler(cfg *config.Config) (*Crawler, error) {
 		slowIPTracker:  NewSlowIPTracker(4 * time.Second),
 		requestHeaders: requestHeaders,
 	}
-	
+
 	log.Printf("[并发控制] gRPC服务器最大并发数设置为: %d", grpcConcurrency)
 	log.Printf("[内存优化] 临时文件目录: %s", tempFileDir)
 
@@ -345,10 +345,14 @@ func (c *Crawler) Start() error {
 	// 启动定期清理临时文件的goroutine
 	c.wg.Add(1)
 	go c.cleanupTempFiles()
-	
+
 	// 启动内存监控goroutine
 	c.wg.Add(1)
 	go c.monitorMemory()
+
+	// 启动gRPC速度监控goroutine
+	c.wg.Add(1)
+	go c.monitorGRPCSpeed()
 
 	log.Println("爬虫系统已启动并等待任务")
 	return nil
@@ -550,19 +554,19 @@ func (c *Crawler) monitorMemory() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(30 * time.Second) // 每30秒监控一次
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			
+
 			// 转换为MB
 			allocMB := float64(m.Alloc) / 1024 / 1024
 			totalAllocMB := float64(m.TotalAlloc) / 1024 / 1024
 			sysMB := float64(m.Sys) / 1024 / 1024
 			numGC := m.NumGC
-			
+
 			// 如果内存使用超过400MB，触发GC
 			if allocMB > 400 {
 				runtime.GC()
@@ -583,7 +587,7 @@ func (c *Crawler) cleanupTempFiles() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(30 * time.Second) // 每30秒清理一次，更及时
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
@@ -599,12 +603,12 @@ func (c *Crawler) cleanupOldTempFiles() {
 	if c.tempFileDir == "" {
 		return
 	}
-	
+
 	entries, err := os.ReadDir(c.tempFileDir)
 	if err != nil {
 		return
 	}
-	
+
 	now := time.Now()
 	cleanedCount := 0
 	failedCount := 0
@@ -612,17 +616,17 @@ func (c *Crawler) cleanupOldTempFiles() {
 		if entry.IsDir() {
 			continue
 		}
-		
+
 		// 只清理.tmp文件
 		if !strings.HasSuffix(entry.Name(), ".tmp") {
 			continue
 		}
-		
+
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		
+
 		// 清理超过30秒的临时文件（正常情况下文件应该立即删除，这里是备用清理）
 		if now.Sub(info.ModTime()) > 30*time.Second {
 			filePath := filepath.Join(c.tempFileDir, entry.Name())
@@ -636,7 +640,7 @@ func (c *Crawler) cleanupOldTempFiles() {
 			}
 		}
 	}
-	
+
 	if cleanedCount > 0 {
 		log.Printf("[清理] 已清理 %d 个临时文件", cleanedCount)
 	}
@@ -650,18 +654,18 @@ func (c *Crawler) cleanupAllTempFiles() {
 	if c.tempFileDir == "" {
 		return
 	}
-	
+
 	entries, err := os.ReadDir(c.tempFileDir)
 	if err != nil {
 		return
 	}
-	
+
 	cleanedCount := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		
+
 		if strings.HasSuffix(entry.Name(), ".tmp") {
 			filePath := filepath.Join(c.tempFileDir, entry.Name())
 			if err := os.Remove(filePath); err == nil {
@@ -669,9 +673,81 @@ func (c *Crawler) cleanupAllTempFiles() {
 			}
 		}
 	}
-	
+
 	if cleanedCount > 0 {
 		log.Printf("[清理] 停止时清理了 %d 个临时文件", cleanedCount)
+	}
+}
+
+// monitorGRPCSpeed 定期监控gRPC传输速度
+func (c *Crawler) monitorGRPCSpeed() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(5 * time.Second) // 每5秒统计一次速度
+	defer ticker.Stop()
+
+	var lastGRPCRequests int64
+	var lastGRPCRequestBytes int64
+	var lastGRPCResponseBytes int64
+	var lastTime time.Time
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			currentGRPCRequests := atomic.LoadInt64(&c.stats.GRPCRequests)
+			currentGRPCRequestBytes := atomic.LoadInt64(&c.stats.GRPCRequestBytes)
+			currentGRPCResponseBytes := atomic.LoadInt64(&c.stats.GRPCResponseBytes)
+
+			if lastTime.IsZero() {
+				// 第一次，只记录当前值
+				lastGRPCRequests = currentGRPCRequests
+				lastGRPCRequestBytes = currentGRPCRequestBytes
+				lastGRPCResponseBytes = currentGRPCResponseBytes
+				lastTime = now
+				continue
+			}
+
+			// 计算时间差（秒）
+			elapsed := now.Sub(lastTime).Seconds()
+			if elapsed <= 0 {
+				continue
+			}
+
+			// 计算增量
+			reqDelta := currentGRPCRequests - lastGRPCRequests
+			reqBytesDelta := currentGRPCRequestBytes - lastGRPCRequestBytes
+			respBytesDelta := currentGRPCResponseBytes - lastGRPCResponseBytes
+			totalBytesDelta := reqBytesDelta + respBytesDelta
+
+			// 计算每秒速度
+			reqPerSec := float64(reqDelta) / elapsed
+			reqBytesPerSec := float64(reqBytesDelta) / elapsed
+			respBytesPerSec := float64(respBytesDelta) / elapsed
+			totalBytesPerSec := float64(totalBytesDelta) / elapsed
+
+			// 格式化速度显示
+			formatBytes := func(bytes float64) string {
+				if bytes >= 1024*1024 {
+					return fmt.Sprintf("%.2fMB/s", bytes/(1024*1024))
+				} else if bytes >= 1024 {
+					return fmt.Sprintf("%.2fKB/s", bytes/1024)
+				}
+				return fmt.Sprintf("%.2fB/s", bytes)
+			}
+
+			if reqDelta > 0 {
+				log.Printf("[gRPC速度] 请求速度=%.1f req/s, 请求流量=%s, 响应流量=%s, 总流量=%s",
+					reqPerSec, formatBytes(reqBytesPerSec), formatBytes(respBytesPerSec), formatBytes(totalBytesPerSec))
+			}
+
+			// 更新记录值
+			lastGRPCRequests = currentGRPCRequests
+			lastGRPCRequestBytes = currentGRPCRequestBytes
+			lastGRPCResponseBytes = currentGRPCResponseBytes
+			lastTime = now
+		case <-c.stopChan:
+			return
+		}
 	}
 }
 
@@ -715,7 +791,7 @@ func (c *Crawler) printStats() {
 	grpcReqBytes := atomic.LoadInt64(&stats.GRPCRequestBytes)
 	grpcRespBytes := atomic.LoadInt64(&stats.GRPCResponseBytes)
 	grpcTotalMicros := atomic.LoadInt64(&stats.GRPCDuration)
-	
+
 	if grpcTotal > 0 {
 		avgGRPCDuration := time.Duration(0)
 		if grpcTotal > 0 {
@@ -747,10 +823,10 @@ func (c *Crawler) Stop() {
 
 	c.pool.Close()
 	c.domainMonitor.Stop()
-	
+
 	// 清理所有临时文件
 	c.cleanupAllTempFiles()
-	
+
 	c.printStats()
 	log.Println("爬虫已停止")
 }

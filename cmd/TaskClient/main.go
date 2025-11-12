@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"utlsProxy/internal/taskapi"
 )
 
@@ -24,6 +26,7 @@ func main() {
 		rpcMaxAttempts  = 5
 		rpcRetryDelay   = 50 * time.Millisecond
 		outputDir       = "/Volumes/SSD/taskclient_data" // 响应体保存目录
+		useKCP          = false                          // 是否使用KCP传输（需要与服务器端配置一致）
 	)
 
 	if repeatCount <= 0 {
@@ -39,9 +42,24 @@ func main() {
 	}
 	log.Printf("响应体将保存到目录: %s", outputDir)
 
-	conn, err := taskapi.Dial(serverAddress)
-	if err != nil {
-		log.Fatalf("连接任务服务失败: %v", err)
+	var conn *grpc.ClientConn
+	var err error
+
+	if useKCP {
+		// 使用KCP传输
+		kcpConfig := taskapi.DefaultKCPConfig()
+		conn, err = taskapi.DialKCP(serverAddress, kcpConfig)
+		if err != nil {
+			log.Fatalf("连接任务服务失败（KCP）: %v", err)
+		}
+		log.Printf("已连接到服务器（KCP传输）: %s", serverAddress)
+	} else {
+		// 使用TCP传输（默认）
+		conn, err = taskapi.Dial(serverAddress)
+		if err != nil {
+			log.Fatalf("连接任务服务失败（TCP）: %v", err)
+		}
+		log.Printf("已连接到服务器（TCP传输）: %s", serverAddress)
 	}
 	defer func() { _ = conn.Close() }()
 
