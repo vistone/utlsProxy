@@ -135,7 +135,26 @@ func formatKCPAddress(address string) string {
 	// 尝试解析地址，检查是否是IPv6地址
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		// 如果解析失败，可能是格式不正确，直接返回原地址
+		// 如果解析失败，尝试手动处理IPv6地址格式（如 "2607:8700:5500:2943::2:9091"）
+		// 查找最后一个冒号，尝试将其作为端口分隔符
+		lastColonIndex := strings.LastIndex(address, ":")
+		if lastColonIndex > 0 && lastColonIndex < len(address)-1 {
+			// 检查最后一个冒号后面的部分是否是数字（端口）
+			possiblePort := address[lastColonIndex+1:]
+			possibleHost := address[:lastColonIndex]
+			
+			// 尝试解析端口号
+			var portNum int
+			if _, err := fmt.Sscanf(possiblePort, "%d", &portNum); err == nil && portNum > 0 && portNum <= 65535 {
+				// 可能是端口号，检查前面的部分是否是IPv6地址
+				ip := net.ParseIP(possibleHost)
+				if ip != nil && ip.To4() == nil && ip.To16() != nil {
+					// 是IPv6地址，使用方括号包裹
+					return fmt.Sprintf("[%s]:%s", possibleHost, possiblePort)
+				}
+			}
+		}
+		// 如果无法解析，直接返回原地址
 		return address
 	}
 	
