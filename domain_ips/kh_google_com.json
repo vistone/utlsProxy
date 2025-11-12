@@ -4348,6 +4348,101 @@
         "postal": "30302",
         "timezone": "America/New_York"
       }
+    },
+    {
+      "ip": "142.251.8.93",
+      "ip_info": {
+        "ip": "142.251.8.93",
+        "hostname": "tb-in-f93.1e100.net",
+        "city": "Taichung",
+        "region": "Taiwan",
+        "country": "TW",
+        "loc": "24.1469,120.6839",
+        "org": "AS15169 Google LLC",
+        "timezone": "Asia/Taipei"
+      }
+    },
+    {
+      "ip": "142.251.8.136",
+      "ip_info": {
+        "ip": "142.251.8.136",
+        "hostname": "tb-in-f136.1e100.net",
+        "city": "Taichung",
+        "region": "Taiwan",
+        "country": "TW",
+        "loc": "24.1469,120.6839",
+        "org": "AS15169 Google LLC",
+        "timezone": "Asia/Taipei"
+      }
+    },
+    {
+      "ip": "142.251.143.46",
+      "ip_info": {
+        "ip": "142.251.143.46",
+        "hostname": "ber07s04-in-f14.1e100.net",
+        "city": "Mountain View",
+        "region": "California",
+        "country": "US",
+        "loc": "38.0088,-122.1175",
+        "org": "AS15169 Google LLC",
+        "postal": "94043",
+        "timezone": "America/Los_Angeles",
+        "anycast": true
+      }
+    },
+    {
+      "ip": "142.251.8.190",
+      "ip_info": {
+        "ip": "142.251.8.190",
+        "hostname": "tb-in-f190.1e100.net",
+        "city": "Taichung",
+        "region": "Taiwan",
+        "country": "TW",
+        "loc": "24.1469,120.6839",
+        "org": "AS15169 Google LLC",
+        "timezone": "Asia/Taipei"
+      }
+    },
+    {
+      "ip": "142.250.178.142",
+      "ip_info": {
+        "ip": "142.250.178.142",
+        "hostname": "par21s22-in-f14.1e100.net",
+        "city": "Paris",
+        "region": "Île-de-France",
+        "country": "FR",
+        "loc": "48.8534,2.3488",
+        "org": "AS15169 Google LLC",
+        "postal": "75000",
+        "timezone": "Europe/Paris"
+      }
+    },
+    {
+      "ip": "142.251.8.91",
+      "ip_info": {
+        "ip": "142.251.8.91",
+        "hostname": "tb-in-f91.1e100.net",
+        "city": "Taichung",
+        "region": "Taiwan",
+        "country": "TW",
+        "loc": "24.1469,120.6839",
+        "org": "AS15169 Google LLC",
+        "timezone": "Asia/Taipei"
+      }
+    },
+    {
+      "ip": "216.58.206.78",
+      "ip_info": {
+        "ip": "216.58.206.78",
+        "hostname": "lhr35s11-in-f14.1e100.net",
+        "city": "Mainz",
+        "region": "Rheinland-Pfalz",
+        "country": "DE",
+        "loc": "49.9819,8.2801",
+        "org": "AS15169 Google LLC",
+        "postal": "55130",
+        "timezone": "Europe/Berlin"
+      }
     }
   ],
   "ipv6": [
@@ -8548,6 +8643,34 @@
         "org": "AS15169 Google LLC",
         "postal": "999077",
         "timezone": "Asia/Hong_Kong",
+        "anycast": true
+      }
+    },
+    {
+      "ip": "2800:3f0:4001:801::200e",
+      "ip_info": {
+        "ip": "2800:3f0:4001:801::200e",
+        "city": "São Paulo",
+        "region": "São Paulo",
+        "country": "BR",
+        "loc": "-23.5475,-46.6361",
+        "org": "AS15169 Google LLC",
+        "postal": "01000-000",
+        "timezone": "America/Sao_Paulo",
+        "anycast": true
+      }
+    },
+    {
+      "ip": "2a00:1450:4001:81d::200e",
+      "ip_info": {
+        "ip": "2a00:1450:4001:81d::200e",
+        "city": "Frankfurt am Main",
+        "region": "Hesse",
+        "country": "DE",
+        "loc": "50.1155,8.6842",
+        "org": "AS15169 Google LLC",
+        "postal": "60306",
+        "timezone": "Europe/Berlin",
         "anycast": true
       }
     }

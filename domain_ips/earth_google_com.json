@@ -4118,6 +4118,34 @@
         "timezone": "America/Los_Angeles",
         "anycast": true
       }
+    },
+    {
+      "ip": "142.250.197.142",
+      "ip_info": {
+        "ip": "142.250.197.142",
+        "hostname": "nchkga-aj-in-f14.1e100.net",
+        "city": "Tung Chung",
+        "region": "Islands",
+        "country": "HK",
+        "loc": "22.2878,113.9424",
+        "org": "AS15169 Google LLC",
+        "postal": "999077",
+        "timezone": "Asia/Hong_Kong"
+      }
+    },
+    {
+      "ip": "142.250.186.174",
+      "ip_info": {
+        "ip": "142.250.186.174",
+        "hostname": "fra24s08-in-f14.1e100.net",
+        "city": "Wiesbaden",
+        "region": "Hesse",
+        "country": "DE",
+        "loc": "50.0860,8.2444",
+        "org": "AS15169 Google LLC",
+        "postal": "65183",
+        "timezone": "Europe/Berlin"
+      }
     }
   ],
   "ipv6": [
@@ -8084,6 +8112,34 @@
       "ip": "2607:f8b0:4002:c0c::71",
       "ip_info": {
         "ip": "2607:f8b0:4002:c0c::71",
+        "city": "Atlanta",
+        "region": "Georgia",
+        "country": "US",
+        "loc": "33.7490,-84.3880",
+        "org": "AS15169 Google LLC",
+        "postal": "30302",
+        "timezone": "America/New_York",
+        "anycast": true
+      }
+    },
+    {
+      "ip": "2404:6800:4005:825::200e",
+      "ip_info": {
+        "ip": "2404:6800:4005:825::200e",
+        "city": "Hong Kong",
+        "region": "Hong Kong",
+        "country": "HK",
+        "loc": "22.2783,114.1747",
+        "org": "AS15169 Google LLC",
+        "postal": "999077",
+        "timezone": "Asia/Hong_Kong",
+        "anycast": true
+      }
+    },
+    {
+      "ip": "2607:f8b0:4002:c1b::65",
+      "ip_info": {
+        "ip": "2607:f8b0:4002:c1b::65",
         "city": "Atlanta",
         "region": "Georgia",
         "country": "US",
