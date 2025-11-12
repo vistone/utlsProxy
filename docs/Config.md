@@ -162,9 +162,11 @@ dialTimeout := cfg.UTlsClient.GetDialTimeout()  // time.Duration
 
 ```toml
 [HotConnPool]
-# 本地IP池配置
-LocalIPv4Addresses = ["192.168.1.100", "192.168.1.101"]
-LocalIPv6SubnetCIDR = "2607:8700:5500:2943::/64"
+# 本地IP池配置（智能自动检测模式）
+# 如果留空，系统会自动检测并使用可用的网络接口IP地址
+# 只有在需要指定特定IP时才需要配置这些选项
+LocalIPv4Addresses = [] # 本地IPv4地址列表（留空则自动检测公网IPv4）
+LocalIPv6SubnetCIDR = "" # 本地IPv6子网CIDR（留空则自动检测，优先使用/64子网，支持隧道模式）
 IPv6QueueSize = 100
 
 # 连接池基础配置
@@ -186,8 +188,8 @@ FingerprintName = ""
 ```
 
 **字段说明**：
-- `LocalIPv4Addresses`: 本地IPv4地址列表（备用）
-- `LocalIPv6SubnetCIDR`: 本地IPv6子网CIDR（优先，如果环境支持）
+- `LocalIPv4Addresses`: 本地IPv4地址列表。如果为空数组 `[]`，系统会自动检测所有可用的**公网IPv4地址**（自动过滤私有地址RFC 1918）
+- `LocalIPv6SubnetCIDR`: 本地IPv6子网CIDR。如果为空字符串 `""`，系统会自动检测可用的**公网IPv6子网**（优先使用/64子网）。如果未检测到公网IPv6子网但系统支持IPv6路由（如通过隧道），会自动启用**IPv6隧道模式**（不绑定本地IP）
 - `IPv6QueueSize`: IPv6地址队列缓冲区大小，默认100
 - `Domain`: 目标域名
 - `Port`: 目标端口，默认443
@@ -198,6 +200,15 @@ FingerprintName = ""
 - `BlacklistTestIntervalMinutes`: 黑名单IP测试间隔（分钟），默认5分钟
 - `IPRefreshIntervalMinutes`: IP列表刷新间隔（分钟），默认10分钟
 - `FingerprintName`: TLS指纹名称，留空则随机选择
+
+**自动检测模式**：
+- 当 `LocalIPv4Addresses = []` 时，系统会自动扫描所有网络接口，检测并过滤出公网IPv4地址（排除10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16等私有地址）
+- 当 `LocalIPv6SubnetCIDR = ""` 时，系统会自动检测公网IPv6子网（优先/64子网，排除ULA和Link-local地址）
+- 如果未检测到公网IPv6子网但系统支持IPv6路由（如通过隧道），会自动启用IPv6隧道模式，此时不绑定本地IP，由系统自动选择路由
+
+**手动指定模式**：
+- 如果需要使用特定的IPv4地址，可以在 `LocalIPv4Addresses` 中指定，例如：`["192.168.1.100", "192.168.1.101"]`
+- 如果需要使用特定的IPv6子网，可以在 `LocalIPv6SubnetCIDR` 中指定，例如：`"2607:8700:5500:2943::/64"`
 
 **特殊说明**：
 - `WarmupPath` 和 `WarmupHeaders` 会自动使用 `RockTreeDataConfig` 中的配置

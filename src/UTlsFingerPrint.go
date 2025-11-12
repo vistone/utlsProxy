@@ -454,15 +454,33 @@ func (lib *Library) randomIndex(n int) int {
 	return lib.rand.Intn(n) // 生成随机索引
 }
 
-// RandomProfile 随机返回一个配置文件
+// getRealBrowserProfiles 获取所有真实浏览器的指纹配置（排除Randomized类型）
+// 返回值：真实浏览器指纹配置列表
+func (lib *Library) getRealBrowserProfiles() []Profile {
+	var realProfiles []Profile
+	for _, profile := range lib.profiles {
+		// 排除Randomized类型的指纹（Browser为"Random"或Platform为"Random"）
+		if profile.Browser != "Random" && profile.Platform != "Random" {
+			realProfiles = append(realProfiles, profile)
+		}
+	}
+	return realProfiles
+}
+
+// RandomProfile 随机返回一个配置文件（只返回真实浏览器的指纹）
 // 返回值：随机选择的配置文件
 func (lib *Library) RandomProfile() Profile {
-	if len(lib.profiles) == 0 { // 如果配置文件列表为空
-		return Profile{HelloID: utls.HelloChrome_Auto, // 返回默认配置
+	// 只使用真实浏览器的指纹
+	realProfiles := lib.getRealBrowserProfiles()
+	if len(realProfiles) == 0 { // 如果真实浏览器指纹列表为空
+		// 返回默认的Chrome配置
+		return Profile{HelloID: utls.HelloChrome_Auto,
 			UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-			Name:      "Default Chrome"}
+			Name:      "Default Chrome",
+			Browser:   "Chrome",
+			Platform:  "Windows"}
 	}
-	return lib.profiles[lib.randomIndex(len(lib.profiles))] // 返回随机选择的配置文件
+	return realProfiles[lib.randomIndex(len(realProfiles))] // 从真实浏览器指纹中随机选择
 }
 
 // ProfileByName 根据名称查找配置文件
@@ -503,11 +521,13 @@ func (lib *Library) ProfilesByPlatform(platform string) []Profile {
 	return result // 返回结果列表
 }
 
-// RecommendedProfiles 返回推荐的配置文件列表
+// RecommendedProfiles 返回推荐的配置文件列表（只返回真实浏览器的指纹）
 // 返回值：推荐的配置文件列表
 func (lib *Library) RecommendedProfiles() []Profile {
+	// 只使用真实浏览器的指纹
+	realProfiles := lib.getRealBrowserProfiles()
 	var recommended []Profile              // 初始化推荐列表
-	for _, profile := range lib.profiles { // 遍历配置文件列表
+	for _, profile := range realProfiles { // 遍历真实浏览器指纹列表
 		if profile.Version == "133" || profile.Version == "131" || // 如果是推荐版本
 			profile.Version == "120" || profile.Version == "auto" {
 			recommended = append(recommended, profile) // 添加到推荐列表
@@ -540,13 +560,14 @@ func (lib *Library) RandomProfileByPlatform(platform string) (*Profile, error) {
 	return &profile, nil                                // 返回配置文件指针
 }
 
-// SafeProfiles 返回安全的配置文件列表
+// SafeProfiles 返回安全的配置文件列表（只返回真实浏览器的指纹）
 // 返回值：安全的配置文件列表
 func (lib *Library) SafeProfiles() []Profile {
+	// 只使用真实浏览器的指纹
+	realProfiles := lib.getRealBrowserProfiles()
 	var safeProfiles []Profile             // 初始化安全配置文件列表
-	for _, profile := range lib.profiles { // 遍历配置文件列表
+	for _, profile := range realProfiles { // 遍历真实浏览器指纹列表
 		if profile.Browser == "Firefox" || // 如果是Firefox浏览器
-			profile.Browser == "Random" || // 或者是随机配置
 			profile.Version == "133" || // 或者是版本133
 			profile.Version == "131" { // 或者是版本131
 			safeProfiles = append(safeProfiles, profile) // 添加到安全配置文件列表

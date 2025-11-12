@@ -7,6 +7,7 @@ import ( // 导入所需的标准库
 	"math/big"        // 用于大整数运算
 	mrand "math/rand" // 用于伪随机数生成
 	"net"             // 用于网络相关功能
+	"strings"         // 用于字符串操作
 	"sync"            // 用于同步原语如互斥锁
 	"time"            // 用于时间处理
 )
@@ -63,11 +64,43 @@ func NewLocalIPPool(staticIPv4s []string, ipv6SubnetCIDR string) (IPPool, error)
 		stopChan: make(chan struct{}),                               // 创建停止信号通道
 	}
 
+	// 如果未提供静态IPv4地址，自动检测系统中可用的IPv4地址
+	if len(staticIPv4s) == 0 {
+		detectedIPv4s := detectAvailableIPv4Addresses()
+		if len(detectedIPv4s) > 0 {
+			fmt.Printf("[IP池] 自动检测到 %d 个IPv4地址: %v\n", len(detectedIPv4s), detectedIPv4s)
+			staticIPv4s = detectedIPv4s
+		} else {
+			fmt.Println("[IP池] 警告: 未检测到可用的IPv4地址")
+		}
+	}
+
 	// 解析并验证传入的静态IPv4地址。
 	for _, s := range staticIPv4s { // 遍历静态IPv4地址列表
 		ip := net.ParseIP(s)              // 解析IP地址字符串
 		if ip != nil && ip.To4() != nil { // 如果解析成功且是IPv4地址
 			pool.staticIPv4s = append(pool.staticIPv4s, ip) // 添加到静态IPv4地址列表
+		}
+	}
+
+	// 如果未提供IPv6子网CIDR，自动检测系统中可用的IPv6子网
+	if ipv6SubnetCIDR == "" {
+		detectedSubnets := detectAvailableIPv6Subnets()
+		if len(detectedSubnets) > 0 {
+			// 优先使用第一个检测到的/64子网
+			ipv6SubnetCIDR = detectedSubnets[0]
+			fmt.Printf("[IP池] 自动检测到IPv6子网: %s\n", ipv6SubnetCIDR)
+		} else {
+			// 即使没有检测到公网IPv6子网，如果系统支持IPv6路由（如通过隧道），
+			// 仍然可以创建IPv6池，但不绑定本地IP，让系统自动选择路由
+			if hasIPv6RoutingSupport() {
+				fmt.Println("[IP池] 未检测到公网IPv6子网，但系统支持IPv6路由（可能通过隧道），将创建IPv6池（不绑定本地IP）")
+				// 创建一个虚拟的IPv6子网，用于标识IPv6支持
+				// 实际使用时不会绑定本地IP，而是让系统自动选择路由
+				ipv6SubnetCIDR = "2000::/3" // 使用全局单播地址范围作为标识
+			} else {
+				fmt.Println("[IP池] 未检测到可用的IPv6子网，将使用IPv4模式")
+			}
 		}
 	}
 
@@ -78,15 +111,27 @@ func NewLocalIPPool(staticIPv4s []string, ipv6SubnetCIDR string) (IPPool, error)
 			return nil, fmt.Errorf("无效的IPv6子网CIDR: %w", err) // 返回错误
 		}
 
+		// 检查是否是虚拟子网标识（用于隧道模式）
+		isVirtualSubnet := subnet.IP.To4() == nil && len(subnet.IP) >= 2 && subnet.IP[0] == 0x20 && subnet.IP[1] == 0x00
+
 		// 核心逻辑：检查当前系统网络配置是否真的支持此IPv6子网。
-		if isSubnetConfigured(subnet) { // 检查子网是否已配置
-			fmt.Println("检测到可用的IPv6子网，已启用IPv6动态生成模式。") // 输出日志
-			pool.hasIPv6Support = true                 // 设置IPv6支持标志
-			pool.ipv6Subnet = subnet                   // 设置IPv6子网
-			pool.ipv6Queue = make(chan net.IP, 100)    // 预生成100个IPv6地址作为缓冲区。
-			go pool.producer()                         // 在后台启动IPv6地址生产者。
+		if isSubnetConfigured(subnet) || isVirtualSubnet { // 检查子网是否已配置，或者是虚拟子网（隧道模式）
+			if isVirtualSubnet {
+				fmt.Println("[IP池] 检测到IPv6路由支持（隧道模式），已启用IPv6模式（不绑定本地IP）。") // 输出日志
+				// 对于隧道模式，不绑定本地IP，让系统自动选择路由
+				// 创建一个特殊的IPv6池，GetIP返回nil表示不绑定本地IP
+				pool.hasIPv6Support = true
+				pool.ipv6Subnet = subnet
+				// 不创建IPv6队列，GetIP时返回nil，表示不绑定本地IP
+			} else {
+				fmt.Println("[IP池] 检测到可用的IPv6子网，已启用IPv6动态生成模式。") // 输出日志
+				pool.hasIPv6Support = true                       // 设置IPv6支持标志
+				pool.ipv6Subnet = subnet                         // 设置IPv6子网
+				pool.ipv6Queue = make(chan net.IP, 100)          // 预生成100个IPv6地址作为缓冲区。
+				go pool.producer()                               // 在后台启动IPv6地址生产者。
+			}
 		} else { // 如果子网未配置
-			fmt.Println("未在当前网络环境中检测到指定的IPv6子网，已降级为仅IPv4模式。") // 输出日志
+			fmt.Printf("[IP池] 警告: 未在当前网络环境中检测到指定的IPv6子网 %s，已降级为仅IPv4模式。\n", ipv6SubnetCIDR) // 输出日志
 		}
 	}
 
@@ -101,18 +146,24 @@ func NewLocalIPPool(staticIPv4s []string, ipv6SubnetCIDR string) (IPPool, error)
 // GetIP 从池中获取一个可用的IP地址。
 //
 // 如果池已启用IPv6支持，它将优先返回一个动态生成的、全新的IPv6地址。
+// 对于隧道模式（虚拟子网），返回nil表示不绑定本地IP，让系统自动选择路由。
 // 这种模式下，调用会阻塞直到获取到新的IP。
 //
 // 如果池工作在仅IPv4模式，它将从预设的列表中随机返回一个IPv4地址。
 func (p *LocalIPPool) GetIP() net.IP { // 实现GetIP方法
 	p.mu.RLock()                // 加读锁
 	hasIPv6 := p.hasIPv6Support // 获取IPv6支持标志
+	ipv6Queue := p.ipv6Queue    // 获取IPv6队列引用
 	p.mu.RUnlock()              // 解读锁
 
 	if hasIPv6 { // 如果支持IPv6
+		// 如果IPv6队列为nil，说明是隧道模式，返回nil表示不绑定本地IP
+		if ipv6Queue == nil {
+			return nil // 隧道模式：不绑定本地IP，让系统自动选择路由
+		}
 		// 从队列中获取一个预生成的IPv6地址。
 		// 如果队列为空，此操作会阻塞，直到后台生产者放入新的地址。
-		return <-p.ipv6Queue // 从IPv6队列获取地址
+		return <-ipv6Queue // 从IPv6队列获取地址
 	}
 
 	// 在仅IPv4模式下，从静态列表中随机选择一个。
@@ -186,6 +237,185 @@ func (p *LocalIPPool) generateRandomIPInSubnet() net.IP { // 生成子网内随�
 	}
 
 	return prefix // 返回生成的IPv6地址
+}
+
+// isPrivateIPv4 检查IPv4地址是否为私有地址（RFC 1918）
+func isPrivateIPv4(ip net.IP) bool {
+	if ip.To4() == nil {
+		return false
+	}
+	// 10.0.0.0/8
+	if ip[0] == 10 {
+		return true
+	}
+	// 172.16.0.0/12
+	if ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31 {
+		return true
+	}
+	// 192.168.0.0/16
+	if ip[0] == 192 && ip[1] == 168 {
+		return true
+	}
+	return false
+}
+
+// isPrivateIPv6 检查IPv6地址是否为私有地址
+func isPrivateIPv6(ip net.IP) bool {
+	if ip.To4() != nil {
+		return false
+	}
+	// fc00::/7 (ULA - Unique Local Addresses)
+	if len(ip) >= 2 && ip[0] == 0xfc {
+		return true
+	}
+	if len(ip) >= 2 && ip[0] == 0xfd {
+		return true
+	}
+	// fe80::/10 (Link-local addresses)
+	if len(ip) >= 2 && ip[0] == 0xfe && (ip[1]&0xc0) == 0x80 {
+		return true
+	}
+	return false
+}
+
+// detectAvailableIPv4Addresses 自动检测系统中可用的公网IPv4地址
+// 返回所有非回环、已启用接口的公网IPv4地址列表（排除私有地址）
+func detectAvailableIPv4Addresses() []string {
+	var ipv4List []string
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ipv4List
+	}
+
+	for _, iface := range interfaces {
+		// 忽略状态为Down的接口或回环接口
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				// 只处理IPv4地址
+				if ipv4 := ipnet.IP.To4(); ipv4 != nil {
+					// 排除私有地址（内网地址）
+					if !isPrivateIPv4(ipv4) {
+						ipv4List = append(ipv4List, ipv4.String())
+					}
+				}
+			}
+		}
+	}
+	return ipv4List
+}
+
+// detectAvailableIPv6Subnets 自动检测系统中可用的公网IPv6子网
+// 返回所有非回环、已启用接口的公网IPv6子网CIDR列表（优先返回/64子网，排除私有地址）
+func detectAvailableIPv6Subnets() []string {
+	var subnets []string
+	seenSubnets := make(map[string]bool) // 用于去重
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return subnets
+	}
+
+	for _, iface := range interfaces {
+		// 忽略状态为Down的接口或回环接口
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				// 只处理IPv6地址
+				if ipnet.IP.To4() == nil {
+					// 排除私有地址（内网地址）
+					if isPrivateIPv6(ipnet.IP) {
+						continue
+					}
+
+					ones, bits := ipnet.Mask.Size()
+
+					// 如果已经是/64子网，直接使用
+					if ones == 64 && bits == 128 {
+						subnetCIDR := fmt.Sprintf("%s/64", ipnet.IP.String())
+						if !seenSubnets[subnetCIDR] {
+							subnets = append(subnets, subnetCIDR)
+							seenSubnets[subnetCIDR] = true
+						}
+					} else if ones >= 64 {
+						// 如果子网掩码大于等于64位，提取前64位作为子网前缀
+						// 例如：2607:f8b0:4002:c09::5d/128 -> 2607:f8b0:4002:c09::/64
+						ip := make(net.IP, 16)
+						copy(ip, ipnet.IP)
+						// 将后64位（后8字节）清零，得到/64子网前缀
+						for i := 8; i < 16; i++ {
+							ip[i] = 0
+						}
+						subnetCIDR := fmt.Sprintf("%s/64", ip.String())
+						if !seenSubnets[subnetCIDR] {
+							subnets = append(subnets, subnetCIDR)
+							seenSubnets[subnetCIDR] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	return subnets
+}
+
+// hasIPv6RoutingSupport 检查系统是否支持IPv6路由（可能通过隧道）
+func hasIPv6RoutingSupport() bool {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+
+	for _, iface := range interfaces {
+		// 检查是否有IPv6隧道接口（如sit0, tun0, ip6tnl0等）
+		ifaceName := iface.Name
+		if strings.HasPrefix(ifaceName, "sit") ||
+			strings.HasPrefix(ifaceName, "tun") ||
+			strings.HasPrefix(ifaceName, "ip6tnl") ||
+			strings.HasPrefix(ifaceName, "6to4") ||
+			strings.HasPrefix(ifaceName, "teredo") {
+			// 检查接口是否启用
+			if iface.Flags&net.FlagUp != 0 {
+				return true
+			}
+		}
+
+		// 检查是否有IPv6路由（通过检查接口是否有IPv6地址，即使是私有地址）
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				// 如果接口有IPv6地址（包括私有地址），说明系统支持IPv6
+				if ipnet.IP.To4() == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // isSubnetConfigured 遍历当前系统的所有网络接口及其地址，

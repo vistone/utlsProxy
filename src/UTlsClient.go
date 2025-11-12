@@ -7,6 +7,7 @@ import ( // 导入标准库和第三方库
 	"net"      // 用于网络操作
 	"net/http" // 用于HTTP协议操作
 	"strings"  // 用于字符串操作
+	"sync"     // 用于同步原语
 	"time"     // 用于时间操作
 
 	utls "github.com/refraction-networking/utls" // UTLS库，用于TLS指纹伪装
@@ -20,17 +21,21 @@ type UTlsClientApi interface { // 定义UTlsClient的接口类型
 
 // UTlsClient 定义UTLS客户端结构体
 type UTlsClient struct { // 定义UTLS客户端结构体，实现UTlsClientApi接口
-	ReadTimeout time.Duration // 读取超时时间，默认30秒
-	DialTimeout time.Duration // 连接超时时间，默认10秒
-	MaxRetries  int           // 最大重试次数，默认0（不重试）
+	ReadTimeout      time.Duration                     // 读取超时时间，默认30秒
+	DialTimeout      time.Duration                     // 连接超时时间，默认10秒
+	MaxRetries       int                               // 最大重试次数，默认0（不重试）
+	HotConnPool      HotConnPool                       // 热连接池（可选），如果设置则优先使用连接池中的连接
+	http2ClientConns map[*utls.UConn]*http2.ClientConn // HTTP/2客户端连接缓存（用于连接复用）
+	http2ConnsMutex  sync.RWMutex                      // 保护http2ClientConns的互斥锁
 }
 
 // NewUTlsClient 创建并初始化一个新的UTLS客户端
 func NewUTlsClient() *UTlsClient { // NewUTlsClient函数：创建UTLS客户端实例，返回客户端指针
 	return &UTlsClient{ // 返回初始化的客户端实例
-		ReadTimeout: 30 * time.Second, // 设置默认读取超时为30秒
-		DialTimeout: 10 * time.Second, // 设置默认连接超时为10秒
-		MaxRetries:  0,                // 设置默认最大重试次数为0（不重试）
+		ReadTimeout:      30 * time.Second,                        // 设置默认读取超时为30秒
+		DialTimeout:      10 * time.Second,                        // 设置默认连接超时为10秒
+		MaxRetries:       0,                                       // 设置默认最大重试次数为0（不重试）
+		http2ClientConns: make(map[*utls.UConn]*http2.ClientConn), // 初始化HTTP/2连接缓存
 	}
 }
 
@@ -94,82 +99,291 @@ type UTlsResponse struct { // 定义UTLS响应结构体
 }
 
 // Do 执行一个请求，支持HTTP和HTTPS，IPv4/IPv6，并具备降级到域名访问的能力
+// 如果设置了HotConnPool，优先使用连接池中的连接
 func (c *UTlsClient) Do(req *UTlsRequest) (*UTlsResponse, error) { // Do方法：执行UTLS请求，返回响应和错误
 	startTime := time.Now() // 记录请求开始时间
 
 	isHTTPS := strings.HasPrefix(strings.ToLower(req.Path), "https://") // 根据路径判断是否使用HTTPS协议
 
-	var port string // 声明端口变量
-	if isHTTPS {    // 如果是HTTPS请求
-		port = "443" // 设置HTTPS默认端口443
-	} else { // 如果是HTTP请求
-		port = "80" // 设置HTTP默认端口80
-	}
+	// 最多重试一次（如果使用连接池连接失败，重试从连接池获取连接）
+	maxRetries := 1
+	for retry := 0; retry <= maxRetries; retry++ {
+		var connInfoVar *connInfo      // 声明连接信息变量
+		var err error                  // 声明错误变量
+		var usePool bool               // 是否使用连接池
+		var uConn *utls.UConn          // UTLS连接（用于连接池）
+		var connDuration time.Duration // 连接建立耗时
 
-	var connInfo *connInfo // 声明连接信息变量
-	var err error          // 声明错误变量
+		// 如果设置了热连接池且是HTTPS请求，必须使用连接池（不创建新连接）
+		if c.HotConnPool != nil && isHTTPS {
+			poolConnStartTime := time.Now()
+			uConn, err = c.HotConnPool.GetConn()
+			poolConnDuration := time.Since(poolConnStartTime)
+			if err == nil {
+				// 成功从连接池获取连接
+				usePool = true
+				connDuration = poolConnDuration
+				// 获取连接状态，判断协议类型
+				state := uConn.ConnectionState()
+				protocol := state.NegotiatedProtocol
+				if protocol == "" {
+					protocol = "http/1.1"
+				}
+				connInfoVar = &connInfo{
+					conn:     uConn,
+					protocol: protocol,
+					isHTTPS:  isHTTPS,
+					isIPv6:   false, // 从连接池获取的连接，这里不需要判断IPv6
+				}
+			} else {
+				// 连接池获取失败，等待并重试（不创建新连接）
+				if retry < maxRetries {
+					fmt.Printf("[UTlsClient] 从连接池获取连接失败，等待重试... (重试 %d/%d): %v\n", retry+1, maxRetries, err)
+					time.Sleep(100 * time.Millisecond) // 等待100ms后重试
+					continue
+				}
+				return nil, fmt.Errorf("无法从连接池获取连接: %w", err)
+			}
+		} else if c.HotConnPool == nil || !isHTTPS {
+			// 如果没有设置热连接池或不是HTTPS请求，创建新连接
+			newConnStartTime := time.Now()
+			var port string // 声明端口变量
+			if isHTTPS {    // 如果是HTTPS请求
+				port = "443" // 设置HTTPS默认端口443
+			} else { // 如果是HTTP请求
+				port = "80" // 设置HTTP默认端口80
+			}
 
-	if req.DomainIP != "" { // 如果提供了目标IP地址
-		connInfo, err = c.connectWithIP(req, isHTTPS, port) // 尝试使用IP地址建立连接
-		if err != nil {                                     // 如果IP连接失败
-			formattedIP := formatIPAddress(req.DomainIP)               // 格式化IP地址用于日志输出
-			fmt.Printf("通过IP %s 连接失败，降级到域名连接: %v\n", formattedIP, err) // 输出降级日志
-			connInfo, err = c.connectWithDomain(req, isHTTPS, port)    // 降级到使用域名连接
-			if err != nil {                                            // 如果域名连接也失败
-				return nil, fmt.Errorf("无法通过IP或域名建立连接: %w", err) // 返回连接失败错误
+			if req.DomainIP != "" { // 如果提供了目标IP地址
+				connInfoVar, err = c.connectWithIP(req, isHTTPS, port) // 尝试使用IP地址建立连接
+				if err != nil {                                        // 如果IP连接失败
+					formattedIP := formatIPAddress(req.DomainIP)               // 格式化IP地址用于日志输出
+					fmt.Printf("通过IP %s 连接失败，降级到域名连接: %v\n", formattedIP, err) // 输出降级日志
+					connInfoVar, err = c.connectWithDomain(req, isHTTPS, port) // 降级到使用域名连接
+					if err != nil {                                            // 如果域名连接也失败
+						if retry < maxRetries {
+							fmt.Printf("[UTlsClient] 连接失败，重试中... (重试 %d/%d)\n", retry+1, maxRetries)
+							continue // 重试
+						}
+						return nil, fmt.Errorf("无法通过IP或域名建立连接: %w", err) // 返回连接失败错误
+					}
+				}
+			} else { // 如果没有提供IP地址
+				connInfoVar, err = c.connectWithDomain(req, isHTTPS, port) // 直接使用域名建立连接
+				if err != nil {                                            // 如果连接失败
+					if retry < maxRetries {
+						fmt.Printf("[UTlsClient] 连接失败，重试中... (重试 %d/%d)\n", retry+1, maxRetries)
+						continue // 重试
+					}
+					return nil, fmt.Errorf("无法通过域名建立连接: %w", err) // 返回连接失败错误
+				}
+			}
+			connDuration = time.Since(newConnStartTime)
+
+			// 如果不是使用连接池，需要延迟关闭连接
+			defer connInfoVar.conn.Close() // 延迟关闭连接，确保函数返回时关闭
+		}
+
+		var statusCode int                           // 声明状态码变量
+		var body []byte                              // 声明响应体变量
+		if connInfoVar.protocol == "h2" && isHTTPS { // 如果协商的协议是HTTP/2且是HTTPS连接
+			statusCode, body, err = c.sendHTTP2Request(connInfoVar.conn, req) // 使用HTTP/2协议发送请求
+			if err != nil {                                                   // 如果发送失败
+				if usePool && c.HotConnPool != nil {
+					// 如果使用连接池，返回连接时标记为错误
+					c.HotConnPool.ReturnConn(uConn, 0) // 状态码0表示错误
+				}
+				// 如果是连接错误（如 unexpected EOF、closed network connection），且还有重试机会，则重试
+				errStr := err.Error()
+				if retry < maxRetries && (strings.Contains(errStr, "EOF") ||
+					strings.Contains(errStr, "broken pipe") ||
+					strings.Contains(errStr, "connection reset") ||
+					strings.Contains(errStr, "use of closed network connection") ||
+					strings.Contains(errStr, "closed network connection")) {
+					fmt.Printf("[UTlsClient] 连接池连接失效 (%v)，重试从连接池获取连接...\n", err)
+					continue // 重试
+				}
+				return nil, fmt.Errorf("发送HTTP/2请求失败: %w", err) // 返回发送失败错误
+			}
+		} else { // 如果使用HTTP/1.1协议
+			err = c.sendHTTPRequest(connInfoVar.conn, req) // 发送HTTP/1.1请求
+			if err != nil {                                // 如果发送失败
+				if usePool && c.HotConnPool != nil {
+					// 如果使用连接池，返回连接时标记为错误
+					c.HotConnPool.ReturnConn(uConn, 0) // 状态码0表示错误
+				}
+				// 如果是连接错误（如 unexpected EOF、closed network connection），且还有重试机会，则重试
+				errStr := err.Error()
+				if retry < maxRetries && (strings.Contains(errStr, "EOF") ||
+					strings.Contains(errStr, "broken pipe") ||
+					strings.Contains(errStr, "connection reset") ||
+					strings.Contains(errStr, "use of closed network connection") ||
+					strings.Contains(errStr, "closed network connection")) {
+					fmt.Printf("[UTlsClient] 连接池连接失效 (%v)，重试从连接池获取连接...\n", err)
+					continue // 重试
+				}
+				return nil, fmt.Errorf("发送HTTP请求失败: %w", err) // 返回发送失败错误
+			}
+
+			statusCode, body, err = c.readHTTPResponse(connInfoVar.conn) // 读取HTTP响应
+			if err != nil {                                              // 如果读取失败
+				if usePool && c.HotConnPool != nil {
+					// 如果使用连接池，返回连接时标记为错误
+					c.HotConnPool.ReturnConn(uConn, 0) // 状态码0表示错误
+				}
+				// 如果是连接错误（如 unexpected EOF、closed network connection），且还有重试机会，则重试
+				errStr := err.Error()
+				if retry < maxRetries && (strings.Contains(errStr, "EOF") ||
+					strings.Contains(errStr, "broken pipe") ||
+					strings.Contains(errStr, "connection reset") ||
+					strings.Contains(errStr, "use of closed network connection") ||
+					strings.Contains(errStr, "closed network connection")) {
+					fmt.Printf("[UTlsClient] 连接池连接失效 (%v)，重试从连接池获取连接...\n", err)
+					continue // 重试
+				}
+				return nil, fmt.Errorf("读取HTTP响应失败: %w", err) // 返回读取失败错误
 			}
 		}
-	} else { // 如果没有提供IP地址
-		connInfo, err = c.connectWithDomain(req, isHTTPS, port) // 直接使用域名建立连接
-		if err != nil {                                         // 如果连接失败
-			return nil, fmt.Errorf("无法通过域名建立连接: %w", err) // 返回连接失败错误
+
+		// 获取目标IP和本地IP用于日志输出和统计
+		var targetIP string
+		var localIP string
+		if connInfoVar.conn != nil {
+			if remoteAddr := connInfoVar.conn.RemoteAddr(); remoteAddr != nil {
+				if tcpAddr, ok := remoteAddr.(*net.TCPAddr); ok {
+					targetIP = tcpAddr.IP.String()
+				} else {
+					targetIP = remoteAddr.String()
+				}
+			}
+			if localAddr := connInfoVar.conn.LocalAddr(); localAddr != nil {
+				if tcpAddr, ok := localAddr.(*net.TCPAddr); ok {
+					localIP = tcpAddr.IP.String()
+				} else {
+					localIP = localAddr.String()
+				}
+			}
 		}
+		// 如果从连接池获取的连接，可能无法直接获取IP，尝试从请求中获取
+		if targetIP == "" && req.DomainIP != "" {
+			targetIP = req.DomainIP
+		}
+		if localIP == "" && req.LocalIP != "" {
+			localIP = req.LocalIP
+		}
+
+		// 如果使用连接池，将连接返回到池中
+		// HTTP/2和HTTP/1.1连接都可以复用
+		if usePool && c.HotConnPool != nil {
+			// 如果状态码是403，连接会被连接池关闭，需要清理http2ClientConns缓存
+			if statusCode == 403 {
+				c.http2ConnsMutex.Lock()
+				delete(c.http2ClientConns, uConn) // 从缓存中移除被封的连接
+				c.http2ConnsMutex.Unlock()
+			}
+			// 注意：HTTP/2的ClientConn已经缓存在http2ClientConns中，下次复用时会自动使用
+			// 如果连接返回池时状态码是错误（如403），http2ClientConn会被连接池关闭，缓存已清理
+			c.HotConnPool.ReturnConn(uConn, statusCode)
+		}
+
+		// 提取请求路径（去掉协议和域名部分）
+		requestPath := req.Path
+		if strings.HasPrefix(req.Path, "https://") {
+			// 提取路径部分（跳过 "https://" 的8个字符）
+			if idx := strings.Index(req.Path[8:], "/"); idx != -1 {
+				requestPath = req.Path[8+idx:]
+			} else {
+				requestPath = "/"
+			}
+		} else if strings.HasPrefix(req.Path, "http://") {
+			// 提取路径部分（跳过 "http://" 的7个字符）
+			if idx := strings.Index(req.Path[7:], "/"); idx != -1 {
+				requestPath = req.Path[7+idx:]
+			} else {
+				requestPath = "/"
+			}
+		}
+
+		// 计算请求耗时
+		duration := time.Since(startTime)
+		requestDuration := duration - connDuration // 请求处理耗时（不包括连接建立时间）
+
+		// 如果创建了新连接（不是从池中获取的），但连接池存在，也需要更新统计
+		// 这样即使连接不是从池中获取的，也能正确统计IP的成功/失败次数
+		if !usePool && c.HotConnPool != nil && statusCode > 0 {
+			if targetIP != "" {
+				c.HotConnPool.UpdateIPStats(targetIP, statusCode)
+			} else {
+				// 如果无法获取targetIP，尝试从req.DomainIP获取
+				if req.DomainIP != "" {
+					c.HotConnPool.UpdateIPStats(req.DomainIP, statusCode)
+				}
+			}
+		}
+
+		// 打印请求详细信息（简化日志，不显示对比信息）
+		fmt.Printf("[请求] 路径: [\"%s\"], 目标IP: %s, 本地IP: %s, 状态码: %d, 总耗时: %v (连接获取: %v, 请求处理: %v)\n",
+			requestPath, targetIP, localIP, statusCode, duration, connDuration, requestDuration)
+
+		// 成功，返回响应
+		return &UTlsResponse{
+			WorkID:     req.WorkID,
+			StatusCode: statusCode,
+			Body:       body,
+			Path:       req.Path,
+			Duration:   duration,
+		}, nil
 	}
 
-	defer connInfo.conn.Close() // 延迟关闭连接，确保函数返回时关闭
-
-	var statusCode int                        // 声明状态码变量
-	var body []byte                           // 声明响应体变量
-	if connInfo.protocol == "h2" && isHTTPS { // 如果协商的协议是HTTP/2且是HTTPS连接
-		statusCode, body, err = c.sendHTTP2Request(connInfo.conn, req) // 使用HTTP/2协议发送请求
-		if err != nil {                                                // 如果发送失败
-			return nil, fmt.Errorf("发送HTTP/2请求失败: %w", err) // 返回发送失败错误
-		}
-	} else { // 如果使用HTTP/1.1协议
-		err = c.sendHTTPRequest(connInfo.conn, req) // 发送HTTP/1.1请求
-		if err != nil {                             // 如果发送失败
-			return nil, fmt.Errorf("发送HTTP请求失败: %w", err) // 返回发送失败错误
-		}
-
-		statusCode, body, err = c.readHTTPResponse(connInfo.conn) // 读取HTTP响应
-		if err != nil {                                           // 如果读取失败
-			return nil, fmt.Errorf("读取HTTP响应失败: %w", err) // 返回读取失败错误
-		}
-	}
-
-	return &UTlsResponse{ // 返回响应对象
-		WorkID:     req.WorkID,            // 设置工作ID
-		StatusCode: statusCode,            // 设置状态码
-		Body:       body,                  // 设置响应体
-		Path:       req.Path,              // 设置请求路径
-		Duration:   time.Since(startTime), // 计算请求耗时
-	}, nil // 返回nil错误表示成功
+	// 理论上不会到达这里
+	return nil, fmt.Errorf("请求失败：超过最大重试次数")
 }
 
 // sendHTTP2Request 使用HTTP/2协议发送请求
 func (c *UTlsClient) sendHTTP2Request(conn net.Conn, req *UTlsRequest) (int, []byte, error) { // sendHTTP2Request方法：通过HTTP/2协议发送请求，返回状态码、响应体和错误
 	conn.SetReadDeadline(time.Now().Add(c.getReadTimeout())) // 设置连接读取超时，使用客户端配置的超时时间
 
-	transport := &http2.Transport{} // 创建HTTP/2传输对象
+	// 尝试从缓存中获取http2.ClientConn（用于连接复用）
+	var clientConn *http2.ClientConn
+	var err error
 
-	clientConn, err := transport.NewClientConn(conn) // 使用已建立的连接创建HTTP/2客户端连接
-	if err != nil {                                  // 如果创建连接失败
-		return 0, nil, fmt.Errorf("创建HTTP/2客户端连接失败: %w", err) // 返回创建失败错误
+	// 如果conn是*utls.UConn类型，尝试从缓存中获取
+	if uConn, ok := conn.(*utls.UConn); ok {
+		c.http2ConnsMutex.RLock()
+		clientConn = c.http2ClientConns[uConn]
+		c.http2ConnsMutex.RUnlock()
+	}
+
+	// 如果缓存中没有，创建新的http2.ClientConn
+	if clientConn == nil {
+		transport := &http2.Transport{}                 // 创建HTTP/2传输对象
+		clientConn, err = transport.NewClientConn(conn) // 使用已建立的连接创建HTTP/2客户端连接
+		if err != nil {                                 // 如果创建连接失败
+			// 检查是否是连接已关闭的错误
+			errStr := err.Error()
+			if strings.Contains(errStr, "use of closed network connection") ||
+				strings.Contains(errStr, "closed network connection") ||
+				strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "connection reset") {
+				// 连接已关闭，返回错误以便上层重试
+				return 0, nil, fmt.Errorf("创建HTTP/2客户端连接失败: %w", err)
+			}
+			// 其他错误也返回
+			return 0, nil, fmt.Errorf("创建HTTP/2客户端连接失败: %w", err) // 返回创建失败错误
+		}
+
+		// 将新创建的http2.ClientConn存入缓存（用于后续复用）
+		if uConn, ok := conn.(*utls.UConn); ok {
+			c.http2ConnsMutex.Lock()
+			c.http2ClientConns[uConn] = clientConn
+			c.http2ConnsMutex.Unlock()
+		}
 	}
 
 	httpReq, err := http.NewRequest(req.Method, req.Path, strings.NewReader(string(req.Body))) // 构建HTTP请求对象
 	if err != nil {                                                                            // 如果创建请求失败
-		clientConn.Close()                               // 关闭客户端连接
+		// 注意：不要关闭clientConn，因为它可能会关闭底层连接
+		// 如果底层连接需要关闭，应该由连接池管理
 		return 0, nil, fmt.Errorf("创建HTTP请求失败: %w", err) // 返回创建失败错误
 	}
 
@@ -196,16 +410,32 @@ func (c *UTlsClient) sendHTTP2Request(conn net.Conn, req *UTlsRequest) (int, []b
 
 	resp, err := clientConn.RoundTrip(httpReq) // 发送HTTP/2请求并获取响应
 	if err != nil {                            // 如果发送失败
-		clientConn.Close()                                 // 关闭客户端连接
+		// HTTP/2连接失败，从缓存中移除失效的ClientConn（避免下次复用失效的连接）
+		if uConn, ok := conn.(*utls.UConn); ok {
+			c.http2ConnsMutex.Lock()
+			delete(c.http2ClientConns, uConn) // 从缓存中移除失效的连接
+			c.http2ConnsMutex.Unlock()
+		}
+		// 注意：不要关闭clientConn，因为它可能会关闭底层连接
+		// 如果底层连接需要关闭，应该由连接池管理
+		// clientConn.Close() 可能会关闭底层连接，导致连接池中的连接失效
 		return 0, nil, fmt.Errorf("发送HTTP/2请求失败: %w", err) // 返回发送失败错误
 	}
 	defer resp.Body.Close() // 延迟关闭响应体
 
 	body, err := io.ReadAll(resp.Body) // 读取响应体的所有内容
 	if err != nil {                    // 如果读取失败
+		// 读取响应体失败，从缓存中移除失效的ClientConn（避免下次复用失效的连接）
+		if uConn, ok := conn.(*utls.UConn); ok {
+			c.http2ConnsMutex.Lock()
+			delete(c.http2ClientConns, uConn) // 从缓存中移除失效的连接
+			c.http2ConnsMutex.Unlock()
+		}
 		return resp.StatusCode, nil, fmt.Errorf("读取HTTP/2响应体失败: %w", err) // 返回读取失败错误
 	}
 
+	// 注意：不要关闭clientConn，保持底层连接可用以便复用
+	// HTTP/2的连接复用由http2.Transport管理，我们只管理底层的utls.UConn
 	return resp.StatusCode, body, nil // 返回状态码、响应体和nil错误
 }
 
@@ -245,11 +475,35 @@ func (c *UTlsClient) connectWithIP(req *UTlsRequest, isHTTPS bool, port string) 
 	}
 
 	if isHTTPS { // 如果是HTTPS请求
+		// 确定使用的TLS指纹HelloID
+		helloID := req.Fingerprint.HelloID
+		// 如果指纹为空（Profile的零值），使用随机指纹
+		if req.Fingerprint.Name == "" && req.Fingerprint.UserAgent == "" {
+			randomFingerprint := fpLibrary.RandomProfile() // 随机选择一个指纹配置
+			helloID = randomFingerprint.HelloID
+		}
+
+		// 获取会话缓存（如果连接池存在，使用连接池的会话缓存；否则创建新的）
+		var sessionCache utls.ClientSessionCache
+		if c.HotConnPool != nil {
+			// 如果连接池存在，尝试从连接池获取会话缓存
+			// 注意：这里需要通过类型断言获取连接池的会话缓存
+			if pool, ok := c.HotConnPool.(*domainConnPool); ok {
+				sessionCache = pool.sessionCache
+			}
+		}
+		// 如果连接池不存在或无法获取会话缓存，创建新的会话缓存
+		if sessionCache == nil {
+			sessionCache = utls.NewLRUClientSessionCache(1000)
+		}
+
 		uConn := utls.UClient(tcpConn, &utls.Config{ // 创建UTLS客户端连接，使用TLS指纹伪装
-			ServerName:         req.Domain,                 // 设置服务器名称（SNI）
-			NextProtos:         []string{"h2", "http/1.1"}, // 设置支持的协议列表，优先HTTP/2，降级到HTTP/1.1
-			InsecureSkipVerify: false,                      // 不跳过证书验证
-		}, req.Fingerprint.HelloID) // 使用请求中的TLS指纹HelloID
+			ServerName:             req.Domain,                 // 设置服务器名称（SNI）
+			NextProtos:             []string{"h2", "http/1.1"}, // 支持HTTP/2和HTTP/1.1
+			InsecureSkipVerify:     false,                      // 不跳过证书验证
+			ClientSessionCache:     sessionCache,               // 使用会话缓存支持TLS会话恢复
+			SessionTicketsDisabled: false,                      // 启用会话票据（支持会话恢复）
+		}, helloID) // 使用确定的TLS指纹HelloID
 
 		err = uConn.Handshake() // 执行TLS握手
 		if err != nil {         // 如果握手失败

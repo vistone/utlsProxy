@@ -1,5 +1,5 @@
 [ServerConfig]
-Version="v1.0.1"
+Version="v1.0.2"
 ServerPort=9091
 
 [DNSDomain]
@@ -35,21 +35,23 @@ MaxRetries=0 # 最大重试次数（0表示不重试）
 
 # 热连接池配置
 [HotConnPool]
-# 本地IP池配置
-LocalIPv4Addresses = ["192.168.1.100", "192.168.1.101"] # 本地IPv4地址列表（备用）
-LocalIPv6SubnetCIDR = "2607:8700:5500:2943::/64" # 本地IPv6子网CIDR（优先，如果环境支持）
+# 本地IP池配置（智能自动检测模式）
+# 如果留空，系统会自动检测并使用可用的网络接口IP地址
+# 只有在需要指定特定IP时才需要配置这些选项
+LocalIPv4Addresses = [] # 本地IPv4地址列表（留空则自动检测）
+LocalIPv6SubnetCIDR = "" # 本地IPv6子网CIDR（留空则自动检测，优先使用/64子网）
 IPv6QueueSize = 100 # IPv6地址队列缓冲区大小
 
 # 连接池基础配置
 Domain = "kh.google.com" # 目标域名
 Port = "443" # 目标端口
-MaxConns = 100 # 最大连接数
+MaxConns = 10000 # 最大连接数（健康池和不健康池各10000个，总共20000个连接）
 IdleTimeoutMinutes = 5 # 连接空闲超时时间（分钟）
 
 # 预热配置
 # WarmupPath 和 WarmupHeaders 自动使用 RockTreeDataConfig 中的配置
 WarmupMethod = "GET" # 预热请求方法
-WarmupConcurrency = 10 # 预热并发数
+WarmupConcurrency = 100 # 预热并发数
 
 # 定时任务配置
 BlacklistTestIntervalMinutes = 5 # 黑名单IP测试间隔（分钟）
