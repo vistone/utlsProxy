@@ -11,44 +11,51 @@ import ( // 导入所需的标准库和第三方库
 
 // Config 定义完整的配置结构体
 type Config struct {
-	ServerConfig          ServerConfig          `toml:"ServerConfig"`          // 服务器配置
-	DNSDomain             DNSDomainConfig       `toml:"DNSDomain"`            // DNS域名配置
-	PoolConfig            PoolConfig            `toml:"PoolConfig"`            // 连接池配置
-	IPInfo                IPInfoConfig          `toml:"IPInfo"`                // IP信息配置
-	UTlsClient            UTlsClientConfig      `toml:"UTlsClient"`            // UTLS客户端配置
-	HotConnPool           HotConnPoolConfig    `toml:"HotConnPool"`          // 热连接池配置
-	RockTreeDataConfig    RockTreeDataConfig    `toml:"RockTreeDataConfig"`   // RockTree数据配置
+	ServerConfig           ServerConfig           `toml:"ServerConfig"`           // 服务器配置
+	DNSDomain              DNSDomainConfig        `toml:"DNSDomain"`              // DNS域名配置
+	PoolConfig             PoolConfig             `toml:"PoolConfig"`             // 连接池配置
+	IPInfo                 IPInfoConfig           `toml:"IPInfo"`                 // IP信息配置
+	UTlsClient             UTlsClientConfig       `toml:"UTlsClient"`             // UTLS客户端配置
+	HotConnPool            HotConnPoolConfig      `toml:"HotConnPool"`            // 热连接池配置
+	RockTreeDataConfig     RockTreeDataConfig     `toml:"RockTreeDataConfig"`     // RockTree数据配置
 	EarthImageryDataConfig EarthImageryDataConfig `toml:"EarthImageryDataConfig"` // Earth影像数据配置
 }
 
 // ServerConfig 服务器配置
 type ServerConfig struct {
-	Version    string `toml:"Version"`    // 版本号
-	ServerPort int    `toml:"ServerPort"` // 服务器端口
+	Version                  string `toml:"Version"`                  // 版本号
+	ServerPort               int    `toml:"ServerPort"`               // gRPC 服务器端口
+	EnableQUIC               bool   `toml:"EnableQUIC"`               // 是否启用 QUIC 传输
+	QUICPort                 int    `toml:"QUICPort"`                 // QUIC 监听端口
+	QUICCertFile             string `toml:"QUICCertFile"`             // QUIC TLS 证书路径
+	QUICKeyFile              string `toml:"QUICKeyFile"`              // QUIC TLS 私钥路径
+	QUICCAFile               string `toml:"QUICCAFile"`               // QUIC 根证书（可选，用于客户端校验）
+	QUICALPN                 string `toml:"QUICALPN"`                 // ALPN 标识符
+	QUICMaxIdleTimeoutSecond int    `toml:"QUICMaxIdleTimeoutSecond"` // 会话最大空闲超时（秒）
 }
 
 // DNSDomainConfig DNS域名配置
 type DNSDomainConfig struct {
-	HostName                  []string `toml:"HostName"`                  // 主机名列表
-	StorageDir                string   `toml:"StorageDir"`                // 存储目录
-	StorageFormat             string   `toml:"StorageFormat"`             // 存储格式
-	UpdateIntervalMinutes     int      `toml:"UpdateIntervalMinutes"`     // 更新间隔（分钟）
-	DNSServerFilePath         string   `toml:"DNSServerFilePath"`         // DNS服务器配置文件路径
-	DefaultDNSServers         []string `toml:"DefaultDNSServers"`         // 默认DNS服务器列表
-	DNSQueryTimeoutSeconds    int      `toml:"DNSQueryTimeoutSeconds"`    // DNS查询超时时间（秒）
-	DNSMaxWorkers             int      `toml:"DNSMaxWorkers"`             // DNS并发查询工作线程数
-	HTTPClientTimeoutSeconds  int      `toml:"HTTPClientTimeoutSeconds"`  // HTTP客户端超时时间（秒）
-	HTTPMaxIdleConns          int      `toml:"HTTPMaxIdleConns"`          // HTTP最大空闲连接数
-	HTTPMaxIdleConnsPerHost   int      `toml:"HTTPMaxIdleConnsPerHost"`   // 每个主机最大空闲连接数
-	HTTPIdleConnTimeoutSeconds int     `toml:"HTTPIdleConnTimeoutSeconds"` // HTTP空闲连接超时时间（秒）
+	HostName                   []string `toml:"HostName"`                   // 主机名列表
+	StorageDir                 string   `toml:"StorageDir"`                 // 存储目录
+	StorageFormat              string   `toml:"StorageFormat"`              // 存储格式
+	UpdateIntervalMinutes      int      `toml:"UpdateIntervalMinutes"`      // 更新间隔（分钟）
+	DNSServerFilePath          string   `toml:"DNSServerFilePath"`          // DNS服务器配置文件路径
+	DefaultDNSServers          []string `toml:"DefaultDNSServers"`          // 默认DNS服务器列表
+	DNSQueryTimeoutSeconds     int      `toml:"DNSQueryTimeoutSeconds"`     // DNS查询超时时间（秒）
+	DNSMaxWorkers              int      `toml:"DNSMaxWorkers"`              // DNS并发查询工作线程数
+	HTTPClientTimeoutSeconds   int      `toml:"HTTPClientTimeoutSeconds"`   // HTTP客户端超时时间（秒）
+	HTTPMaxIdleConns           int      `toml:"HTTPMaxIdleConns"`           // HTTP最大空闲连接数
+	HTTPMaxIdleConnsPerHost    int      `toml:"HTTPMaxIdleConnsPerHost"`    // 每个主机最大空闲连接数
+	HTTPIdleConnTimeoutSeconds int      `toml:"HTTPIdleConnTimeoutSeconds"` // HTTP空闲连接超时时间（秒）
 }
 
 // PoolConfig 连接池配置
 type PoolConfig struct {
 	ProxyAddress                  string `toml:"ProxyAddress"`                  // 代理地址
-	Concurrency                  int    `toml:"Concurrency"`                  // 并发数
-	RehabilitationIntervalMinutes int   `toml:"RehabilitationIntervalMinutes"` // 恢复间隔（分钟）
-	IdleTimeoutMinutes           int    `toml:"IdleTimeoutMinutes"`           // 空闲超时（分钟）
+	Concurrency                   int    `toml:"Concurrency"`                   // 并发数
+	RehabilitationIntervalMinutes int    `toml:"RehabilitationIntervalMinutes"` // 恢复间隔（分钟）
+	IdleTimeoutMinutes            int    `toml:"IdleTimeoutMinutes"`            // 空闲超时（分钟）
 }
 
 // IPInfoConfig IP信息配置
@@ -66,15 +73,15 @@ type UTlsClientConfig struct {
 // HotConnPoolConfig 热连接池配置
 type HotConnPoolConfig struct {
 	// 本地IP池配置
-	LocalIPv4Addresses []string `toml:"LocalIPv4Addresses"` // 本地IPv4地址列表（备用）
-	LocalIPv6SubnetCIDR string  `toml:"LocalIPv6SubnetCIDR"` // 本地IPv6子网CIDR（优先）
-	IPv6QueueSize       int     `toml:"IPv6QueueSize"`       // IPv6地址队列缓冲区大小
+	LocalIPv4Addresses  []string `toml:"LocalIPv4Addresses"`  // 本地IPv4地址列表（备用）
+	LocalIPv6SubnetCIDR string   `toml:"LocalIPv6SubnetCIDR"` // 本地IPv6子网CIDR（优先）
+	IPv6QueueSize       int      `toml:"IPv6QueueSize"`       // IPv6地址队列缓冲区大小
 
 	// 连接池基础配置
-	Domain            string `toml:"Domain"`            // 目标域名
-	Port              string `toml:"Port"`             // 目标端口
-	MaxConns          int    `toml:"MaxConns"`         // 最大连接数
-	IdleTimeoutMinutes int   `toml:"IdleTimeoutMinutes"` // 连接空闲超时时间（分钟）
+	Domain             string `toml:"Domain"`             // 目标域名
+	Port               string `toml:"Port"`               // 目标端口
+	MaxConns           int    `toml:"MaxConns"`           // 最大连接数
+	IdleTimeoutMinutes int    `toml:"IdleTimeoutMinutes"` // 连接空闲超时时间（分钟）
 
 	// 预热配置
 	WarmupPath        string `toml:"WarmupPath"`        // 预热测试路径（可选，为空则使用RockTreeDataConfig.CheckStatusPath）
@@ -91,11 +98,11 @@ type HotConnPoolConfig struct {
 
 // RockTreeDataConfig RockTree数据配置
 type RockTreeDataConfig struct {
-	HostName         string   `toml:"HostName"`         // 主机名
-	CheckStatusPath  string   `toml:"CheckStatusPath"` // 检查状态路径
-	BulkMetadataPath string   `toml:"BulkMetadataPath"` // 批量元数据路径
-	NodeDataPath     string   `toml:"NodeDataPath"`    // 节点数据路径
-	ImageryDataPath  string   `toml:"ImageryDataPath"` // 影像数据路径
+	HostName             string   `toml:"HostName"`             // 主机名
+	CheckStatusPath      string   `toml:"CheckStatusPath"`      // 检查状态路径
+	BulkMetadataPath     string   `toml:"BulkMetadataPath"`     // 批量元数据路径
+	NodeDataPath         string   `toml:"NodeDataPath"`         // 节点数据路径
+	ImageryDataPath      string   `toml:"ImageryDataPath"`      // 影像数据路径
 	RocktreeRquestHeader []string `toml:"RocktreeRquestHeader"` // 请求头列表
 }
 
@@ -103,9 +110,9 @@ type RockTreeDataConfig struct {
 type EarthImageryDataConfig struct {
 	HostName        string   `toml:"HostName"`        // 主机名
 	CheckStatusPath string   `toml:"CheckStatusPath"` // 检查状态路径
-	DbrootPath      string   `toml:"dbrootPath"`    // dbroot路径
-	Q2Path          string   `toml:"q2path"`        // q2路径
-	ImageryPath     string   `toml:"imageryPath"`    // 影像路径
+	DbrootPath      string   `toml:"dbrootPath"`      // dbroot路径
+	Q2Path          string   `toml:"q2path"`          // q2路径
+	ImageryPath     string   `toml:"imageryPath"`     // 影像路径
 	RequestHeader   []string `toml:"requestHeader"`   // 请求头列表
 }
 
@@ -211,6 +218,17 @@ func (c *Config) validateAndSetDefaults() error {
 		c.HotConnPool.IPv6QueueSize = 100
 	}
 
+	// QUIC 配置默认值
+	if c.ServerConfig.QUICALPN == "" {
+		c.ServerConfig.QUICALPN = "utls-proxy-quic"
+	}
+	if c.ServerConfig.QUICMaxIdleTimeoutSecond == 0 {
+		c.ServerConfig.QUICMaxIdleTimeoutSecond = 30
+	}
+	if c.ServerConfig.EnableQUIC && c.ServerConfig.QUICPort == 0 {
+		c.ServerConfig.QUICPort = 9092
+	}
+
 	return nil
 }
 
@@ -252,7 +270,7 @@ func (c *Config) GetWarmupPath() string {
 // 返回值：map[string]string 格式的请求头
 func (c *Config) GetWarmupHeaders() map[string]string {
 	var headerList []string
-	
+
 	// 优先使用 RockTreeDataConfig.RocktreeRquestHeader
 	if len(c.RockTreeDataConfig.RocktreeRquestHeader) > 0 {
 		headerList = c.RockTreeDataConfig.RocktreeRquestHeader
@@ -266,7 +284,7 @@ func (c *Config) GetWarmupHeaders() map[string]string {
 			"Accept-Encoding": "gzip, deflate, br, zstd",
 		}
 	}
-	
+
 	// 解析请求头字符串数组为 map
 	headers := make(map[string]string)
 	for _, headerStr := range headerList {
@@ -280,7 +298,7 @@ func (c *Config) GetWarmupHeaders() map[string]string {
 			}
 		}
 	}
-	
+
 	return headers
 }
 
@@ -324,3 +342,10 @@ func (c *UTlsClientConfig) GetDialTimeout() time.Duration {
 	return time.Duration(c.DialTimeoutSeconds) * time.Second
 }
 
+// GetQUICMaxIdleTimeout 获取 QUIC 会话最大空闲超时时间
+func (c *ServerConfig) GetQUICMaxIdleTimeout() time.Duration {
+	if c.QUICMaxIdleTimeoutSecond <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.QUICMaxIdleTimeoutSecond) * time.Second
+}

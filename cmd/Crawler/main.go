@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"google.golang.org/grpc"
 
 	"utlsProxy/config"
@@ -41,6 +42,7 @@ type Crawler struct {
 	ipSelector      uint64
 	grpcServer      *grpc.Server
 	grpcListener    net.Listener
+	quicListener    *quic.Listener
 	tempFileDir     string // 临时文件目录，用于存储大响应体
 }
 
@@ -63,6 +65,14 @@ type CrawlerStats struct {
 	GRPCRequestBytes  int64 // gRPC请求总字节数
 	GRPCResponseBytes int64 // gRPC响应总字节数
 	GRPCDuration      int64 // gRPC请求总耗时（微秒）
+	QUICRequests      int64 // QUIC请求总数
+	QUICSuccess       int64 // QUIC成功请求数
+	QUICFailed        int64 // QUIC失败请求数
+	QUICRequestBytes  int64 // QUIC请求总字节数
+	QUICResponseBytes int64 // QUIC响应总字节数
+	QUICDuration      int64 // QUIC请求总耗时（微秒）
+	QUICSessions      int64 // QUIC会话总数
+	QUICStreams       int64 // QUIC流总数
 	StartTime         time.Time
 }
 
@@ -339,6 +349,10 @@ func (c *Crawler) Start() error {
 	time.Sleep(3 * time.Second)
 
 	if err := c.startGRPCServer(); err != nil {
+		return err
+	}
+
+	if err := c.startQUICServer(); err != nil {
 		return err
 	}
 
@@ -800,6 +814,23 @@ func (c *Crawler) printStats() {
 		log.Printf("[统计] gRPC请求总数=%d (成功=%d, 失败=%d), 平均耗时=%v, 请求流量=%d字节, 响应流量=%d字节, 总流量=%d字节",
 			grpcTotal, grpcSuccess, grpcFailed, avgGRPCDuration, grpcReqBytes, grpcRespBytes, grpcReqBytes+grpcRespBytes)
 	}
+
+	quicTotal := atomic.LoadInt64(&stats.QUICRequests)
+	if quicTotal > 0 {
+		quicSuccess := atomic.LoadInt64(&stats.QUICSuccess)
+		quicFailed := atomic.LoadInt64(&stats.QUICFailed)
+		quicReqBytes := atomic.LoadInt64(&stats.QUICRequestBytes)
+		quicRespBytes := atomic.LoadInt64(&stats.QUICResponseBytes)
+		quicTotalMicros := atomic.LoadInt64(&stats.QUICDuration)
+		quicSessions := atomic.LoadInt64(&stats.QUICSessions)
+		quicStreams := atomic.LoadInt64(&stats.QUICStreams)
+		avgQUICDuration := time.Duration(0)
+		if quicTotal > 0 {
+			avgQUICDuration = time.Duration(quicTotalMicros/quicTotal) * time.Microsecond
+		}
+		log.Printf("[统计] QUIC请求总数=%d (成功=%d, 失败=%d), 平均耗时=%v, 请求流量=%d字节, 响应流量=%d字节, 总流量=%d字节, 会话=%d, 流=%d",
+			quicTotal, quicSuccess, quicFailed, avgQUICDuration, quicReqBytes, quicRespBytes, quicReqBytes+quicRespBytes, quicSessions, quicStreams)
+	}
 }
 
 func (c *Crawler) Stop() {
@@ -812,6 +843,11 @@ func (c *Crawler) Stop() {
 	if c.grpcServer != nil {
 		c.grpcServer.GracefulStop()
 		c.grpcServer = nil
+	}
+
+	if c.quicListener != nil {
+		_ = c.quicListener.Close()
+		c.quicListener = nil
 	}
 
 	c.wg.Wait()
