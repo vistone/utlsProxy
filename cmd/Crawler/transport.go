@@ -57,3 +57,4 @@ func (c *Crawler) metricsForTransport(t transportKind) transportMetrics {
 		return transportMetrics{}
 	}
 }
+
